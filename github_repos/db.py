@@ -2,13 +2,16 @@ from sqlalchemy import Table, Column, ForeignKey
 from sqlalchemy import Integer, String, Boolean
 from sqlalchemy import create_engine
 from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import relationship
+from sqlalchemy.orm import relationship, sessionmaker
 
 import github_repos.config as g
 
 def get_engine(url=g.db_url):
     #return psycopg2.connect(dbname=DBNAME, host=HOST, port=PORT)
     return create_engine(url, client_encoding='utf8')
+
+engine = get_engine()
+Session = sessionmaker(engine)
 
 Base = declarative_base()
 
@@ -31,6 +34,20 @@ class User(Base):
     id = Column('id', Integer, primary_key=True)
     login = Column('login', String, unique=True)
     name = Column('name', String)
+
+class UsersTodo(Base):
+    __tablename__ = 'users_todo'
+
+    id = Column('id', Integer, primary_key=True)
+    user_id = Column('user_id', Integer, ForeignKey('users.id'), unique=True)
+    user = relationship('User', uselist=False)
+
+class ReposTodo(Base):
+    __tablename__ = 'repos_todo'
+
+    id = Column('id', Integer, primary_key=True)
+    repo_id = Column('repo_id', Integer, ForeignKey('repositories.id'), unique=True)
+    repo = relationship('Repo', uselist=False)
 
 class Language(Base):
     __tablename__ = 'languages'
@@ -66,5 +83,4 @@ associations = {
           Column('user_id', Integer, ForeignKey('users.id')),
           Column('repo_id', Integer, ForeignKey('repositories.id')))}
 
-engine = get_engine()
 Base.metadata.create_all(engine)

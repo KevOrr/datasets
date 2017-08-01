@@ -1,11 +1,17 @@
 import itertools as it
+import json
+import time
 
 from github_repos.graphql import GraphQLNode as Gqn
-from github_repos.db import User, Repo, Language, associations
+from github_repos.db import User, Repo, Language, associations, Session
+from github_repos.db import UsersTodo, ReposTodo
 import github_repos.config as g
 from github_repos.util import count_bools
 
 # REPO_INFO = Gqn()
+
+class GraphQLException(RuntimeError):
+    pass
 
 def format_user_expander(user_logins,
                        contributions_cursors=None,
@@ -44,24 +50,30 @@ def format_user_expander(user_logins,
                 Gqn('contributedRepositories',
                     first=100,
                     after=cc)(
-                        Gqn('edges')(
-                            Gqn('nodes'))))
+                        Gqn('nodes')(
+                            Gqn('owner')(
+                                Gqn('login')),
+                            Gqn('name'))))
 
         if expand_issues:
             sub_nodes.append(
                 Gqn('issues',
                     first=100,
                     after=ic)(
-                        Gqn('edges')(
-                            Gqn('nodes'))))
+                        Gqn('nodes')(
+                            Gqn('owner')(
+                                Gqn('login')),
+                            Gqn('name'))))
 
         if expand_pullrequests:
             sub_nodes.append(
                 Gqn('pullRequests',
                     first=100,
                     after=pc)(
-                        Gqn('edges')(
-                            Gqn('nodes'))))
+                        Gqn('nodes')(
+                            Gqn('owner')(
+                                Gqn('login')),
+                            Gqn('name'))))
 
         nodes.append(Gqn('user', login=user)(*sub_nodes))
 
@@ -73,16 +85,16 @@ def format_user_expander(user_logins,
     return (query, cost)
 
 def format_repo_expander(unique_repos,
-                       # contributors_cursors=None,
-                       issues_cursors=None,
-                       pullrequests_cursors=None,
-                       stars_cursors=None,
-                       watchers_cursors=None,
-                       # expand_contributors=g.scraper_expand_repo_contributors,
-                       expand_issues=g.scraper_expand_repo_issues_participants,
-                       expand_pullrequests=g.scraper_expand_repo_pullrequest_participants,
-                       expand_stars=g.scraper_expand_repo_stars,
-                       expand_watchers=g.scraper_expand_repo_watchers):
+                         # contributors_cursors=None,
+                         issues_cursors=None,
+                         pullrequests_cursors=None,
+                         stars_cursors=None,
+                         watchers_cursors=None,
+                         # expand_contributors=g.scraper_expand_repo_contributors,
+                         expand_issues=g.scraper_expand_repo_issues_participants,
+                         expand_pullrequests=g.scraper_expand_repo_pullrequest_participants,
+                         expand_stars=g.scraper_expand_repo_stars,
+                         expand_watchers=g.scraper_expand_repo_watchers):
 
     '''Returns a github_repos.graphql.GraphQLNode that expands all repos in `users_and_repos`.
 
@@ -157,10 +169,104 @@ def format_repo_expander(unique_repos,
 
         nodes.append(Gqn('repository', owner=user, name=repo)(*sub_nodes))
 
-    query = Gqn('query')(*nodes)
+    query = Gqn('query')(
+        Gqn('rateLimit')(
+            Gqn('remaining'),
+            Gqn('resetAt')),
+        *nodes)
 
     per_repo_cost = count_bools((expand_issues, expand_pullrequests, expand_stars, expand_watchers))
     cost = len(unique_repos) * (1 + 100*per_repo_cost)
 
     return (query, cost)
 
+
+def expand_all_users(session, rate_limit_remaining=5000,
+                     contributions_cursors=None,
+                     issues_cursors=None,
+                     pullrequests_cursors=None,
+                     expand_contributions=g.scraper_expand_user_contributions,
+                     expand_issues=g.scraper_expand_user_issues,
+                     expand_pullrequests=g.scraper_expand_user_pullrequests):
+
+    '''Expands all users in github_repos.db.UsersTodo table.
+
+    expand_contributions    whether or not to find repos based on each user's associated contributions
+    expand_issues           whether or not to find repos based on each user's associated issues
+    expand_pullrequests     whether or not to find repos based on each user's associated pullrequests
+    '''
+
+    per_user_cost = count_bools((expand_contributions, expand_issues, expand_pullrequests))
+    contributions_cursors = None
+    issues_cursors = None
+    pullrequests_cursors = None
+    while True:
+        try:
+            next_batch_size = int(rate_limit_remaining * 100 / (1 + 100*per_user_cost)) - 1
+            todos = session.query(UsersTodo).order_by(UsersTodo.id).limit(next_batch_size).subquery()
+            user_logins = session.query(User.login).join(todos)
+
+            query = format_user_expander(user_logins,
+                                         contributions_cursors=contributions_cursors,
+                                         issues_cursors=issues_cursors,
+                                         pullrequests_cursors=pullrequests_cursors)
+            # TODO implement send_query
+            result = send_query(query)
+            if 'errors' in result:
+                raise GraphQLException(result['error'])
+
+            repos = []
+            for user_dict in result['user']:
+                for key in ('contributedRepositories', 'issues', 'pullRequests'):
+                    if key in user_dict:
+                        for repo in user_dict[key]['nodes']:
+                            try:
+                                owner = session.query(User).filter_by(login=repo['owner']['login']).one()
+                            except:
+                                owner = User(login=repo['owner']['login'])
+                                session.add(owner)
+                                session.commit()
+
+                            repos.append(owner, repo['name'])
+
+            for owner, name in repos:
+                # TODO oops forgot github_id
+                repo = Repo(owner_id=owner.id, name=name)
+                session.add(repo)
+
+            session.delete_all(todos)
+            session.commit()
+
+            rate_limit_remaining = result['rateLimit']['remaining']
+            # TODO parse datetime string
+            rate_limit_reset_at = result['rateLimit']['resetAt']
+
+            if rate_limit_remaining <= 2:
+                # TODO use time reset time plus a few seconds here
+                time.sleep(1)
+
+        except json.JSONDecodeError as e:
+            raise e
+        except KeyError as e:
+            raise e
+        except IndexError as e:
+            raise e
+        finally:
+            pass
+
+
+def expand_all_repos(engine, rate_limit_remaining=5000,
+                     # expand_contributors=g.scraper_expand_repo_contributors,
+                     expand_issues=g.scraper_expand_repo_issues_participants,
+                     expand_pullrequests=g.scraper_expand_repo_pullrequest_participants,
+                     expand_stars=g.scraper_expand_repo_stars,
+                     expand_watchers=g.scraper_expand_repo_watchers):
+
+    '''Expands all repos in github_repos.db.ReposTodo table.
+
+    expand_issues           whether or not to find users based from each repo's issues
+    expand_pullrequests     whether or not to find users based from each repo's pullrequests
+    expand_stars            whether or not to find visit each repo's stargazer
+    expand_watchers         whether or not to find visit each repo's watcher
+    '''
+    pass
