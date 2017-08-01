@@ -1,10 +1,12 @@
-import github_repos.scraper as scraper
-import github_repos.graphql as graphql
-import github_repos.config as config
+from . import config
+from . import graphql
+from . import util
+from . import scraper
 
 if config.debug:
     import importlib
     importlib.reload(config)
     importlib.reload(graphql)
+    importlib.reload(util)
     importlib.reload(scraper)
     del importlib

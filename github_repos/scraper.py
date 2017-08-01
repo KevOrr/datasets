@@ -3,10 +3,11 @@ import itertools as it
 from github_repos.graphql import GraphQLNode as Gqn
 from github_repos.db import User, Repo, Language, associations
 import github_repos.config as g
+from github_repos.util import count_bools
 
 # REPO_INFO = Gqn()
 
-def format_repo_getter(user_logins,
+def format_user_expander(user_logins,
                        contributions_cursors=None,
                        issues_cursors=None,
                        pullrequests_cursors=None,
@@ -64,9 +65,14 @@ def format_repo_getter(user_logins,
 
         nodes.append(Gqn('user', login=user)(*sub_nodes))
 
-    return Gqn('query')(*nodes)
+    query =  Gqn('query')(*nodes)
 
-def format_user_getter(unique_repos,
+    per_user_cost = count_bools((expand_contributions, expand_issues, expand_pullrequests))
+    cost = len(user_logins) * (1 + 100*per_user_cost)
+
+    return (query, cost)
+
+def format_repo_expander(unique_repos,
                        # contributors_cursors=None,
                        issues_cursors=None,
                        pullrequests_cursors=None,
@@ -114,41 +120,47 @@ def format_user_getter(unique_repos,
         #         Gqn('contributors',
         #             first=100,
         #             after=cc)(
-        #                 Gqn('edges')(
-        #                     Gqn('nodes'))))
+        #                 Gqn('nodes')(
+        #                     Gqn('login'))))
 
         if expand_issues:
             sub_nodes.append(
                 Gqn('issues',
                     first=100,
                     after=ic)(
-                        Gqn('edges')(
-                            Gqn('nodes'))))
+                        Gqn('nodes')(
+                            Gqn('login'))))
 
         if expand_pullrequests:
             sub_nodes.append(
                 Gqn('pullRequests',
                     first=100,
                     after=pc)(
-                        Gqn('edges')(
-                            Gqn('nodes'))))
+                        Gqn('nodes')(
+                            Gqn('login'))))
 
         if expand_stars:
             sub_nodes.append(
                 Gqn('stargazers',
                     first=100,
                     after=sc)(
-                        Gqn('edges')(
-                            Gqn('nodes'))))
+                        Gqn('nodes')(
+                            Gqn('login'))))
 
         if expand_watchers:
             sub_nodes.append(
                 Gqn('watchers',
                     first=100,
                     after=wc)(
-                        Gqn('edges')(
-                            Gqn('nodes'))))
+                        Gqn('nodes')(
+                            Gqn('login'))))
 
         nodes.append(Gqn('repository', owner=user, name=repo)(*sub_nodes))
 
-    return Gqn('query')(*nodes)
+    query = Gqn('query')(*nodes)
+
+    per_repo_cost = count_bools((expand_issues, expand_pullrequests, expand_stars, expand_watchers))
+    cost = len(unique_repos) * (1 + 100*per_repo_cost)
+
+    return (query, cost)
+
