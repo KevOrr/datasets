@@ -39,31 +39,32 @@ class Language(Base):
     name = Column('name', String)
     color = Column('color', String)
 
-associations = {'repo_languages':
-                Table('repo_languages', Base.metadata,
-                      Column('repo_id', Integer, ForeignKey('users.id')),
-                      Column('lang_id', Integer, ForeignKey('repositories.id')),
-                      Column('rank', Integer)),
+associations = {
+    'repo_languages':
+    Table('repo_languages', Base.metadata,
+          Column('repo_id', Integer, ForeignKey('users.id')),
+          Column('lang_id', Integer, ForeignKey('repositories.id')),
+          Column('rank', Integer)),
 
-                'contributed':
-                Table('contributed', Base.metadata,
-                      Column('user_id', Integer, ForeignKey('users.id')),
-                      Column('repo_id', Integer, ForeignKey('repositories.id'))),
+    'contributed':
+    Table('contributed', Base.metadata,
+          Column('user_id', Integer, ForeignKey('users.id')),
+          Column('repo_id', Integer, ForeignKey('repositories.id'))),
 
-                'submitted_issue_pullrequest':
-                Table('submitted_issue_pullrequest', Base.metadata,
-                      Column('user_id', Integer, ForeignKey('users.id')),
-                      Column('repo_id', Integer, ForeignKey('repositories.id'))),
+    'submitted_issue_pullrequest':
+    Table('submitted_issue_pullrequest', Base.metadata,
+          Column('user_id', Integer, ForeignKey('users.id')),
+          Column('repo_id', Integer, ForeignKey('repositories.id'))),
 
-                'starred':
-                Table('starred', Base.metadata,
-                      Column('user_id', Integer, ForeignKey('users.id')),
-                      Column('repo_id', Integer, ForeignKey('repositories.id'))),
+    'starred':
+    Table('starred', Base.metadata,
+          Column('user_id', Integer, ForeignKey('users.id')),
+          Column('repo_id', Integer, ForeignKey('repositories.id'))),
 
-                'watching':
-                Table('watching', Base.metadata,
-                      Column('user_id', Integer, ForeignKey('users.id')),
-                      Column('repo_id', Integer, ForeignKey('repositories.id')))}
+    'watching':
+    Table('watching', Base.metadata,
+          Column('user_id', Integer, ForeignKey('users.id')),
+          Column('repo_id', Integer, ForeignKey('repositories.id')))}
 
 engine = get_engine()
 Base.metadata.create_all(engine)
