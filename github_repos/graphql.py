@@ -1,3 +1,5 @@
+import json
+
 class GraphQLNode:
     # Named something that hopefully won't conflict with any graphql names, about 91 bits of entropy here
     # Wish I had gensym here...
@@ -30,9 +32,9 @@ class GraphQLNode:
     # TODO pretty-print
     def format(self):
         if self.args:
-            argstr = '({}: {!r}'.format(*self.args[0])
+            argstr = '({}: {}'.format(self.args[0][0], json.dumps(self.args[0][1]))
             for arg in self.args[1:]:
-                argstr += ', {}: {!r}'.format(*arg)
+                argstr += ', {}: {}'.format(arg[0], json.dumps(arg[1]))
             argstr += ')'
         else:
             argstr = ''
