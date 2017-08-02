@@ -2,6 +2,9 @@ import itertools as it
 import json
 import time
 
+import requests
+from sqlalchemy.orm.exc import NoResultFound
+
 from github_repos.graphql import GraphQLNode as Gqn
 from github_repos.db import User, Repo, Language, associations, Session
 from github_repos.db import UsersTodo, ReposTodo
@@ -13,13 +16,17 @@ from github_repos.util import count_bools
 class GraphQLException(RuntimeError):
     pass
 
+def send_query(query, url=g.api_url, api_key=g.personal_token, sender=requests.post):
+    headers = {'Authorization': 'bearer ' + api_key}
+    return sender(url, headers=headers, data=json.dumps({'query': query.format()})).json()
+
 def format_user_expander(user_logins,
-                       contributions_cursors=None,
-                       issues_cursors=None,
-                       pullrequests_cursors=None,
-                       expand_contributions=g.scraper_expand_user_contributions,
-                       expand_issues=g.scraper_expand_user_issues,
-                       expand_pullrequests=g.scraper_expand_user_pullrequests):
+                         contributions_cursors=None,
+                         issues_cursors=None,
+                         pullrequests_cursors=None,
+                         expand_contributions=g.scraper_expand_user_contributions,
+                         expand_issues=g.scraper_expand_user_issues,
+                         expand_pullrequests=g.scraper_expand_user_pullrequests):
 
     '''Returns a github_repos.graphql.GraphQLNode that expands all users in `user_logins`.
 
@@ -210,8 +217,13 @@ def expand_all_users(session, rate_limit_remaining=5000,
                                          contributions_cursors=contributions_cursors,
                                          issues_cursors=issues_cursors,
                                          pullrequests_cursors=pullrequests_cursors)
-            # TODO implement send_query
-            result = send_query(query)
+
+            try:
+                result = send_query(query)
+            except json.JSONDecodeError as e:
+                # TODO handle weird timeout html page being returned
+                raise e
+
             if 'errors' in result:
                 raise GraphQLException(result['error'])
 
@@ -222,19 +234,19 @@ def expand_all_users(session, rate_limit_remaining=5000,
                         for repo in user_dict[key]['nodes']:
                             try:
                                 owner = session.query(User).filter_by(login=repo['owner']['login']).one()
-                            except:
+                            except NoResultFound:
                                 owner = User(login=repo['owner']['login'])
                                 session.add(owner)
                                 session.commit()
 
                             repos.append(owner, repo['name'])
 
+            # Keep the delete-todos-and-insert-new cycle as short as possible, then commit
+            session.delete_all(todos)
             for owner, name in repos:
-                # TODO oops forgot github_id
                 repo = Repo(owner_id=owner.id, name=name)
                 session.add(repo)
 
-            session.delete_all(todos)
             session.commit()
 
             rate_limit_remaining = result['rateLimit']['remaining']

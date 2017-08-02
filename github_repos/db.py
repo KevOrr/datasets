@@ -19,7 +19,7 @@ class Repo(Base):
     __tablename__ = 'repositories'
 
     id = Column('id', Integer, primary_key=True)
-    gtihub_id = Column('github_id', String, unique=True)
+    # github_id = Column('github_id', String, unique=True)
     name = Column('name', String)
     description = Column('description', String)
     owner_id = Column('owner_id', Integer, ForeignKey('users.id'))
