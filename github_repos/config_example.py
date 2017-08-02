@@ -1,6 +1,9 @@
 debug = True
 
-db_url = 'postgresql://kevin@localhost:5433/github'
+api_url = 'https://api.github.com/graphql'
+personal_token = 'dontshowthisdamnthingtoanyoneyouhearmeok'
+
+db_url = 'postgresql://me@localhost:5432/github'
 
 # scraper_expand_repo_contributors = True
 scraper_expand_repo_issues_participants = True
