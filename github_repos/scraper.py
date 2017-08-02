@@ -1,6 +1,7 @@
 import itertools as it
 import json
 import time
+import calendar
 
 import requests
 from sqlalchemy.orm.exc import NoResultFound
@@ -250,18 +251,16 @@ def expand_all_users(session, rate_limit_remaining=5000,
             session.commit()
 
             rate_limit_remaining = result['rateLimit']['remaining']
-            # TODO parse datetime string
-            rate_limit_reset_at = result['rateLimit']['resetAt']
 
             if rate_limit_remaining <= 2:
-                # TODO use time reset time plus a few seconds here
-                time.sleep(1)
+                rate_limit_reset_at = time.strptime(result['rateLimit']['resetAt'], "%Y-%m-%dT%H:%M:%Sz")
+                reset_time = calendar.timegm(rate_limit_reset_at)
+                now = time.gmtime()
 
-        except json.JSONDecodeError as e:
-            raise e
-        except KeyError as e:
-            raise e
-        except IndexError as e:
+                time.sleep(10 + max(0, reset_time - now))
+
+        except Exception as e:
+            session.rollback()
             raise e
         finally:
             pass
