@@ -20,19 +20,34 @@ class Repo(Base):
 
     id = Column('id', Integer, primary_key=True)
     # github_id = Column('github_id', String, unique=True)
-    name = Column('name', String)
+    name = Column('name', String, index=True)
     description = Column('description', String)
-    owner_id = Column('owner_id', Integer, ForeignKey('users.id'))
+    owner_id = Column('owner_id', Integer, ForeignKey('users.id'), index=True)
     disk_usage = Column('disk_usage', Integer)
     url = Column('url', String)
     is_fork = Column('is_fork', Boolean)
     is_mirror = Column('is_mirror', Boolean)
 
+    owner = relationship('User', uselist=False)
+
 class User(Base):
     __tablename__ = 'users'
 
     id = Column('id', Integer, primary_key=True)
-    login = Column('login', String, unique=True)
+    login = Column('login', String, index=True, unique=True)
+    name = Column('name', String)
+
+class NewUser(Base):
+    __tablename__ = 'new_user'
+
+    id = Column('id', Integer, primary_key=True)
+    login = Column('login', String)
+
+class NewRepo(Base):
+    __tablename__ = 'new_repos'
+
+    id = Column('id', Integer, primary_key=True)
+    owner_login = Column('owner_login', String)
     name = Column('name', String)
 
 class UsersTodo(Base):
@@ -56,31 +71,38 @@ class Language(Base):
     name = Column('name', String)
     color = Column('color', String)
 
+class QueryCost(Base):
+    __tablename__ = 'query_costs'
+
+    id = Column('id', Integer, primary_key=True)
+    guess = Column('guess', Integer)
+    normalized_actual = Column('normalized_actual', Integer)
+
 associations = {
     'repo_languages':
     Table('repo_languages', Base.metadata,
-          Column('repo_id', Integer, ForeignKey('users.id')),
-          Column('lang_id', Integer, ForeignKey('repositories.id')),
+          Column('repo_id', Integer, ForeignKey('users.id'), index=True),
+          Column('lang_id', Integer, ForeignKey('repositories.id'), index=True),
           Column('rank', Integer)),
 
     'contributed':
     Table('contributed', Base.metadata,
-          Column('user_id', Integer, ForeignKey('users.id')),
-          Column('repo_id', Integer, ForeignKey('repositories.id'))),
+          Column('user_id', Integer, ForeignKey('users.id'), index=True),
+          Column('repo_id', Integer, ForeignKey('repositories.id'), index=True)),
 
     'submitted_issue_pullrequest':
     Table('submitted_issue_pullrequest', Base.metadata,
-          Column('user_id', Integer, ForeignKey('users.id')),
-          Column('repo_id', Integer, ForeignKey('repositories.id'))),
+          Column('user_id', Integer, ForeignKey('users.id'), index=True),
+          Column('repo_id', Integer, ForeignKey('repositories.id'), index=True)),
 
     'starred':
     Table('starred', Base.metadata,
-          Column('user_id', Integer, ForeignKey('users.id')),
-          Column('repo_id', Integer, ForeignKey('repositories.id'))),
+          Column('user_id', Integer, ForeignKey('users.id'), index=True),
+          Column('repo_id', Integer, ForeignKey('repositories.id'), index=True)),
 
     'watching':
     Table('watching', Base.metadata,
-          Column('user_id', Integer, ForeignKey('users.id')),
-          Column('repo_id', Integer, ForeignKey('repositories.id')))}
+          Column('user_id', Integer, ForeignKey('users.id'), index=True),
+          Column('repo_id', Integer, ForeignKey('repositories.id'), index=True))}
 
 Base.metadata.create_all(engine)
