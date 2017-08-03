@@ -50,6 +50,7 @@ def format_user_expander(user_logins,
     if not pullrequests_cursors:
         pullrequests_cursors = it.repeat(None)
 
+    gensym_counter = 1
     nodes = []
     for user, cc, ic, pc in zip(user_logins, contributions_cursors, issues_cursors, pullrequests_cursors):
         sub_nodes = []
@@ -70,9 +71,10 @@ def format_user_expander(user_logins,
                     first=100,
                     after=ic)(
                         Gqn('nodes')(
-                            Gqn('owner')(
-                                Gqn('login')),
-                            Gqn('name'))))
+                            Gqn('repository')(
+                                Gqn('owner')(
+                                    Gqn('login')),
+                                Gqn('name')))))
 
         if expand_pullrequests:
             sub_nodes.append(
@@ -80,11 +82,13 @@ def format_user_expander(user_logins,
                     first=100,
                     after=pc)(
                         Gqn('nodes')(
-                            Gqn('owner')(
-                                Gqn('login')),
-                            Gqn('name'))))
+                            Gqn('repository')(
+                                Gqn('owner')(
+                                    Gqn('login')),
+                                Gqn('name')))))
 
-        nodes.append(Gqn(user, 'user', login=user)(*sub_nodes))
+        nodes.append(Gqn('usr' + str(gensym_counter), 'user', login=user)(*sub_nodes))
+        gensym_counter += 1
 
     query = \
             Gqn('query')(
@@ -96,6 +100,8 @@ def format_user_expander(user_logins,
 
     per_user_cost = count_bools((expand_contributions, expand_issues, expand_pullrequests))
     cost = len(user_logins) * (1 + 100*per_user_cost)
+
+    print(query.format())
 
     return (query, cost)
 
@@ -233,8 +239,9 @@ def expand_all_users(session, rate_limit_remaining=5000,
     pullrequests_cursors = None
     try:
         next_batch_size = int(rate_limit_remaining * 100 / (1 + 100*per_user_cost)) - 1
-        todos = session.query(UsersTodo).order_by(UsersTodo.id).limit(next_batch_size).subquery()
-        user_logins = session.query(User.login).join(todos)
+        todos_ids = tuple(t[0] for t in session.query(UsersTodo).order_by(UsersTodo.id).limit(next_batch_size).all())
+        # TODO figure this out
+        user_logins = tuple(u[0] for u in session.query(User.login).filter(User.id.in_(todos_ids.id)).all())
 
         query, cost_guess = format_user_expander(user_logins,
                                                  contributions_cursors=contributions_cursors,
@@ -248,15 +255,24 @@ def expand_all_users(session, rate_limit_remaining=5000,
             raise e
 
         if 'errors' in result:
-            raise GraphQLException(result['error'])
+            raise GraphQLException(result['errors'])
 
         data = result['data']
 
         repos = []
-        for user_dict in data['user']:
-            for key in ('contributedRepositories', 'issues', 'pullRequests'):
-                for repo in user_dict[key].get('nodes', ()):
-                    owner_login = repo['user']['login']
+        for data_key, user in data.items():
+            if not data_key.lower().startswith('usr'):
+                # Not at a user node (probably rateLimit)
+                continue
+
+            for connection in ('contributedRepositories', 'issues', 'pullRequests'):
+                for node in user[connection]['nodes']:
+                    if connection == 'contributedRepositories':
+                        repo = node
+                    else:
+                        repo = node['repository']
+
+                    owner_login = repo['owner']['login']
                     if user_fetched(session, owner_login):
                         owner = session.query(User).filter_by(login=owner_login).one()
                     elif user_discovered_not_fetched(session, owner_login):
@@ -265,12 +281,12 @@ def expand_all_users(session, rate_limit_remaining=5000,
                         owner = NewUser(login=owner_login)
                         session.add(owner)
 
-                    repos.append(owner, repo['name'])
+                    repos.append((owner, repo['name']))
 
         session.commit()
 
         # Keep the delete-todos-and-insert-new cycle as short as possible, then commit
-        session.delete_all(todos)
+        session.query(UsersTodo).filter(UsersTodo.id == todos_subq.c.id).delete(synchronize_session='fetch')
         for owner, name in repos:
             repo = Repo(owner_id=owner.id, name=name)
             session.add(repo)
