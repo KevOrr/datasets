@@ -3,14 +3,25 @@ import json
 class GraphQLNode:
     # Named something that hopefully won't conflict with any graphql names, about 91 bits of entropy here
     # Wish I had gensym here...
-    def __init__(self, tUqFUwfpLIkrUAjy, **kwargs):
-        self.name = tUqFUwfpLIkrUAjy
+    def __init__(self, *tUqFUwfpLIkrUAjy, **kwargs):
+        args = tUqFUwfpLIkrUAjy
+        if len(args) not in (1, 2):
+            e = ValueError('__init__ takes either a GraphQL node identifier, or a json key and node identifier. ' +
+                           'You supplied {} positional arguments'.format(len(args)))
+            raise e
 
-        args = []
+        if len(args) == 2:
+            self.json_name = args[0]
+            self.gql_name = args[1]
+        else:
+            self.json_name = None
+            self.gql_name = args[0]
+
+        gql_args = []
         for k, v in kwargs.items():
             if v is not None:
-                args.append((k, v))
-        self.args = tuple(args)
+                gql_args.append((k, v))
+        self.args = tuple(gql_args)
 
         self.children = ()
 
@@ -31,6 +42,11 @@ class GraphQLNode:
 
     # TODO pretty-print
     def format(self):
+        if self.json_name:
+            namestr = self.json_name + ': '
+        else:
+            namestr = ''
+
         if self.args:
             argstr = '({}: {}'.format(self.args[0][0], json.dumps(self.args[0][1]))
             for arg in self.args[1:]:
@@ -47,7 +63,8 @@ class GraphQLNode:
         else:
             childrenstr = ''
 
-        return '{name} {args}{children}'.format(name=self.name, args=argstr, children=childrenstr)
+        return '{jsonname}{name} {args}{children}'.format(
+            jsonname=namestr, name=self.gql_name, args=argstr, children=childrenstr)
 
     def export(self):
         exported_children = []
@@ -57,4 +74,4 @@ class GraphQLNode:
             else:
                 exported_children.append(child)
 
-        return (self.name, self.args, tuple(exported_children))
+        return (self.gql_name, self.args, tuple(exported_children))
