@@ -18,8 +18,13 @@ class GraphQLException(RuntimeError):
     pass
 
 def send_query(query, url=g.api_url, api_key=g.personal_token, sender=requests.post):
+    if not isinstance(query, str):
+        query = query.format()
+
     headers = {'Authorization': 'bearer ' + api_key}
-    return sender(url, headers=headers, data=json.dumps({'query': query.format()})).json()
+    result = sender(url, headers=headers, data=json.dumps({'query': query})).json()
+
+    return result
 
 
 def format_user_expander(user_logins,
@@ -51,57 +56,49 @@ def format_user_expander(user_logins,
         pullrequests_cursors = it.repeat(None)
 
     gensym_counter = 1
-    nodes = []
+    query = ''
     for user, cc, ic, pc in zip(user_logins, contributions_cursors, issues_cursors, pullrequests_cursors):
-        sub_nodes = []
+        sub_nodes = ''
 
         if expand_contributions:
-            sub_nodes.append(
-                Gqn('contributedRepositories',
-                    first=100,
-                    after=cc)(
-                        Gqn('nodes')(
-                            Gqn('owner')(
-                                Gqn('login')),
-                            Gqn('name'))))
+            sub_nodes += 'contributedRepositories(first: 100, after: %s) {...ownerOfNode}\n' % json.dumps(cc)
 
         if expand_issues:
-            sub_nodes.append(
-                Gqn('issues',
-                    first=100,
-                    after=ic)(
-                        Gqn('nodes')(
-                            Gqn('repository')(
-                                Gqn('owner')(
-                                    Gqn('login')),
-                                Gqn('name')))))
+            sub_nodes += 'issues(first: 100, after: %s) {...ownerOfRepoOfNode}\n' % json.dumps(ic)
 
         if expand_pullrequests:
-            sub_nodes.append(
-                Gqn('pullRequests',
-                    first=100,
-                    after=pc)(
-                        Gqn('nodes')(
-                            Gqn('repository')(
-                                Gqn('owner')(
-                                    Gqn('login')),
-                                Gqn('name')))))
+            sub_nodes += 'pullRequests(first: 100, after: %s) {...ownerOfRepoOfNode}\n' % json.dumps(pc)
 
-        nodes.append(Gqn('usr' + str(gensym_counter), 'user', login=user)(*sub_nodes))
+        query += 'usr%d: user(login=%s){%s}' % (gensym_counter, json.dumps(user), sub_nodes)
         gensym_counter += 1
 
-    query = \
-            Gqn('query')(
-                Gqn('rateLimit')(
-                    Gqn('cost'),
-                    Gqn('remaining'),
-                    Gqn('resetAt')),
-                *nodes)
+    query += '''
+    fragment ownerOfNode on User {
+        nodes {
+            owner {
+                __typename
+                login
+            }
+            name
+        }
+    }
+
+    fragment ownerOfRepoOfNode on User {
+        nodes {
+            repository {
+                owner {
+                    __typename
+                    login
+                }
+                name
+            }
+        }
+    }'''
 
     per_user_cost = count_bools((expand_contributions, expand_issues, expand_pullrequests))
     cost = len(user_logins) * (1 + 100*per_user_cost)
 
-    print(query.format())
+    print(query)
 
     return (query, cost)
 
@@ -205,10 +202,7 @@ def format_repo_expander(unique_repos,
     return (query, cost)
 
 
-def user_discovered_not_fetched(session, login):
-    return session.query(exists().where(NewUser.login == login)).scalar()
-
-def user_fetched(session, login):
+def user_discovered_fetched(session, login):
     return session.query(exists().where(User.login == login)).scalar()
 
 def repo_discovered_not_fetched(session, owner_login, name):
@@ -217,6 +211,24 @@ def repo_discovered_not_fetched(session, owner_login, name):
 def repo_fetched(session, owner_login, name):
     return session.query(exists().where((Repo.owner.login == owner_login) & (Repo.name == name))).scalar()
 
+
+def fetch_owners(session, owners):
+    nodes = []
+    gensym_counter = 1
+    for owner in owners:
+        nodes.append(Gqn('usr' + str(gensym_counter), 'user', login=owner.login)(
+            Gqn('name')))
+        gensym_counter += 1
+
+    query = \
+            Gqn('query')(
+                Gqn('rateLimit')(
+                    Gqn('cost'),
+                    Gqn('remaining'),
+                    Gqn('resetAt')),
+                *nodes)
+
+    return send_query(query)
 
 def expand_all_users(session, rate_limit_remaining=5000,
                      contributions_cursors=None,
@@ -239,28 +251,22 @@ def expand_all_users(session, rate_limit_remaining=5000,
     pullrequests_cursors = None
     try:
         next_batch_size = int(rate_limit_remaining * 100 / (1 + 100*per_user_cost)) - 1
-        todos_ids = tuple(t[0] for t in session.query(UsersTodo).order_by(UsersTodo.id).limit(next_batch_size).all())
+        todos_ids = tuple(t[0] for t in session.query(UsersTodo.user_id).order_by(UsersTodo.id).limit(next_batch_size).all())
         # TODO figure this out
-        user_logins = tuple(u[0] for u in session.query(User.login).filter(User.id.in_(todos_ids.id)).all())
+        user_logins = tuple(u[0] for u in session.query(User.login).filter(User.id.in_(todos_ids)).all())
 
         query, cost_guess = format_user_expander(user_logins,
                                                  contributions_cursors=contributions_cursors,
                                                  issues_cursors=issues_cursors,
                                                  pullrequests_cursors=pullrequests_cursors)
 
-        try:
-            result = send_query(query)
-        except json.JSONDecodeError as e:
-            # TODO handle weird timeout html page being returned
-            raise e
-
-        if 'errors' in result:
-            raise GraphQLException(result['errors'])
-
-        data = result['data']
+        # TODO handle weird timeout html page being returned
+        import pdb; pdb.set_trace()
+        result = send_query(query)
 
         repos = []
-        for data_key, user in data.items():
+        owners_to_fetch = set()
+        for data_key, user in result.items():
             if not data_key.lower().startswith('usr'):
                 # Not at a user node (probably rateLimit)
                 continue
@@ -273,39 +279,39 @@ def expand_all_users(session, rate_limit_remaining=5000,
                         repo = node['repository']
 
                     owner_login = repo['owner']['login']
-                    if user_fetched(session, owner_login):
+                    if user_discovered_fetched(session, owner_login):
                         owner = session.query(User).filter_by(login=owner_login).one()
-                    elif user_discovered_not_fetched(session, owner_login):
-                        owner = session.query(NewUser).filter_by(login=owner_login).one()
                     else:
-                        owner = NewUser(login=owner_login)
+                        owner = User(login=owner_login)
+                        owners_to_fetch.add(owner)
                         session.add(owner)
 
                     repos.append((owner, repo['name']))
 
-        session.commit()
+        import pdb; pdb.set_trace()
+        # TODO handle weird timeout html page being returned
+        fetch_owners_result = fetch_owners(session, owners_to_fetch)
+        rate_limit_remaining = fetch_owners_result['rateLimit']['remaining']
+        rate_limit_reset_at = time.strptime(fetch_owners_result['rateLimit']['resetAt'], "%Y-%m-%dT%H:%M:%Sz")
+
+        session.add(QueryCost(guess=cost_guess, normalized_actual=result['rateLimit']['cost']))
 
         # Keep the delete-todos-and-insert-new cycle as short as possible, then commit
-        session.query(UsersTodo).filter(UsersTodo.id == todos_subq.c.id).delete(synchronize_session='fetch')
+        session.query(UsersTodo).filter(UsersTodo.id.in_(todos_ids)).delete(synchronize_session='fetch')
         for owner, name in repos:
-            repo = Repo(owner_id=owner.id, name=name)
+            repo = NewRepo(owner_login=owner.login, name=name)
             session.add(repo)
 
-        session.add(QueryCost(guess=cost_guess, normalized_actual=data['rateLimit']['cost']))
-
-        rate_limit_remaining = data['rateLimit']['remaining']
         if rate_limit_remaining <= 2:
-            rate_limit_reset_at = time.strptime(data['rateLimit']['resetAt'], "%Y-%m-%dT%H:%M:%Sz")
             reset_time = calendar.timegm(rate_limit_reset_at)
             now = time.gmtime()
-
             time.sleep(10 + max(0, reset_time - now))
+
+        session.commit()
 
     except Exception as e:
         session.rollback()
         raise e
-    else:
-        session.commit()
 
 
 def expand_all_repos(engine, rate_limit_remaining=5000,

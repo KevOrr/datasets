@@ -37,12 +37,6 @@ class User(Base):
     login = Column('login', String, index=True, unique=True)
     name = Column('name', String)
 
-class NewUser(Base):
-    __tablename__ = 'new_user'
-
-    id = Column('id', Integer, primary_key=True)
-    login = Column('login', String)
-
 class NewRepo(Base):
     __tablename__ = 'new_repos'
 

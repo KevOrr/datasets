@@ -1,6 +1,6 @@
 import json
 
-class GraphQLNode:
+class Node:
     # Named something that hopefully won't conflict with any graphql names, about 91 bits of entropy here
     # Wish I had gensym here...
     def __init__(self, *tUqFUwfpLIkrUAjy, **kwargs):
@@ -29,12 +29,12 @@ class GraphQLNode:
         new_children = []
         for node in nodes:
             if node:
-                if isinstance(node, GraphQLNode):
+                if isinstance(node, Node):
                     new_children.append(node)
                 elif isinstance(node, str):
-                    new_children.append(GraphQLNode(node))
+                    new_children.append(Node(node))
                 else:
-                    e = TypeError('Each child to a GraphQLNode must be a GraphQLNode or string')
+                    e = TypeError('Each child to a Node must be a Node or string')
                     raise e
 
         self.children = tuple(list(self.children) + new_children)
@@ -69,9 +69,10 @@ class GraphQLNode:
     def export(self):
         exported_children = []
         for child in self.children:
-            if isinstance(child, GraphQLNode):
+            if isinstance(child, Node):
                 exported_children.append(child.export())
             else:
                 exported_children.append(child)
 
         return (self.gql_name, self.args, tuple(exported_children))
+
