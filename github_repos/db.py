@@ -1,7 +1,8 @@
 from sqlalchemy import Table, Column, ForeignKey
-from sqlalchemy import Integer, String, Boolean
+from sqlalchemy import Integer, SmallInteger, String, Boolean
 from sqlalchemy import create_engine
 from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.ext.associationproxy import association_proxy
 from sqlalchemy.orm import relationship, sessionmaker
 
 import github_repos.config as g
@@ -22,34 +23,42 @@ class Repo(Base):
     # github_id = Column('github_id', String, unique=True)
     name = Column('name', String, index=True)
     description = Column('description', String)
-    owner_id = Column('owner_id', Integer, ForeignKey('users.id'), index=True)
+    owner_id = Column('owner_id', Integer, ForeignKey('owners.id'), index=True)
     disk_usage = Column('disk_usage', Integer)
     url = Column('url', String)
     is_fork = Column('is_fork', Boolean)
     is_mirror = Column('is_mirror', Boolean)
 
-    owner = relationship('User', uselist=False)
+    owner = relationship('Owner', uselist=False)
+    languages = relationship('Language')
 
-class User(Base):
-    __tablename__ = 'users'
+class OwnerType(Base):
+    __tablename__ = 'owner_types'
+
+    id = Column('id', SmallInteger, primary_key=True)
+    typename = Column('type', String, unique=True)
+
+    def __init__(self, typename):
+        self.typename = typename
+
+class Owner(Base):
+    __tablename__ = 'owners'
 
     id = Column('id', Integer, primary_key=True)
     login = Column('login', String, index=True, unique=True)
-    name = Column('name', String)
+    type_id = Column('type_id', SmallInteger, ForeignKey('owner_types.id'))
+
+    owner_type = relationship('OwnerType', uselist=False)
+    owner_typename = association_proxy('owner_type', 'typename')
 
 class NewRepo(Base):
     __tablename__ = 'new_repos'
 
     id = Column('id', Integer, primary_key=True)
-    owner_login = Column('owner_login', String)
+    owner_id = Column('owner_id', Integer, ForeignKey('owners.id'))
     name = Column('name', String)
 
-class UsersTodo(Base):
-    __tablename__ = 'users_todo'
-
-    id = Column('id', Integer, primary_key=True)
-    user_id = Column('user_id', Integer, ForeignKey('users.id'), unique=True)
-    user = relationship('User', uselist=False)
+    owner = relationship('Owner', uselist=False)
 
 class ReposTodo(Base):
     __tablename__ = 'repos_todo'
@@ -72,31 +81,9 @@ class QueryCost(Base):
     guess = Column('guess', Integer)
     normalized_actual = Column('normalized_actual', Integer)
 
-associations = {
-    'repo_languages':
-    Table('repo_languages', Base.metadata,
-          Column('repo_id', Integer, ForeignKey('users.id'), index=True),
-          Column('lang_id', Integer, ForeignKey('repositories.id'), index=True),
-          Column('rank', Integer)),
-
-    'contributed':
-    Table('contributed', Base.metadata,
-          Column('user_id', Integer, ForeignKey('users.id'), index=True),
-          Column('repo_id', Integer, ForeignKey('repositories.id'), index=True)),
-
-    'submitted_issue_pullrequest':
-    Table('submitted_issue_pullrequest', Base.metadata,
-          Column('user_id', Integer, ForeignKey('users.id'), index=True),
-          Column('repo_id', Integer, ForeignKey('repositories.id'), index=True)),
-
-    'starred':
-    Table('starred', Base.metadata,
-          Column('user_id', Integer, ForeignKey('users.id'), index=True),
-          Column('repo_id', Integer, ForeignKey('repositories.id'), index=True)),
-
-    'watching':
-    Table('watching', Base.metadata,
-          Column('user_id', Integer, ForeignKey('users.id'), index=True),
-          Column('repo_id', Integer, ForeignKey('repositories.id'), index=True))}
+repo_languages = Table('repo_languages', Base.metadata,
+                       Column('repo_id', Integer, ForeignKey('repositories.id'), index=True),
+                       Column('lang_id', Integer, ForeignKey('languages.id'), index=True),
+                       Column('rank', Integer))
 
 Base.metadata.create_all(engine)
