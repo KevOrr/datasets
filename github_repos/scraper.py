@@ -2,15 +2,16 @@ import itertools as it
 import json
 import time
 import calendar
+from textwrap import dedent
 
 import requests
 from sqlalchemy.orm.exc import NoResultFound
 from sqlalchemy import exists
 
-from github_repos.graphql import GraphQLNode as Gqn
+from github_repos.graphql import Node as Gqn
 from github_repos.db import associations, Session
 from github_repos.db import User, Repo, Language, QueryCost
-from github_repos.db import UsersTodo, ReposTodo, NewUser, NewRepo
+from github_repos.db import UsersTodo, ReposTodo, NewRepo
 import github_repos.config as g
 from github_repos.util import count_bools
 
@@ -26,6 +27,75 @@ def send_query(query, url=g.api_url, api_key=g.personal_token, sender=requests.p
 
     return result
 
+def both_steps_format(repos):
+    fragments = dedent('''
+    fragment repoInfo on Repository {
+        name
+        owner {
+            __typename
+            login
+        }
+    }
+
+    fragment userConnectionExpand on User {
+        nodes {
+            contributedRepositories(first: 10, privacy: PUBLIC, orderBy: {field: STARGAZERS, direction: DESC}) {
+                nodes {
+                    ...repoInfo
+                }
+            }
+            issues(first: 10, orderBy: {field: COMMENTS, direction: DESC}) {
+                nodes {
+                    repository {
+                        ...repoInfo
+                    }
+                }
+            }
+            pullRequests(first: 10) {
+                nodes {
+                    repository {
+                        ...repoInfo
+                    }
+                }
+            }
+            starredRepositories(first: 10, orderBy: {field: STARRED_AT, direction: DESC}) {
+                nodes {
+                    ...repoInfo
+                }
+            }
+        }
+    }
+
+    fragment repoExpand on Repository {
+        mentionableUsers(first: 10) {
+            ...userConnectionExpand
+        }
+        pullRequests(first: 10) {
+            participants {
+                ...userConnectionExpand
+            }
+        }
+        starGazers(first: 100, orderBy: {field: STARRED_AT, direction: DESC}) {
+            ...userConnectionExpand
+        }
+        watchers(first: 100) {
+            ...userConnectionExpand
+        }
+    }''')
+
+    rate_limit = '\n    rateLimit {cost remaining resetAt}'''
+
+    gensym_counter = 1
+    query = ''
+    for owner, name in repos:
+        query += '    repo%d: repository(owner:%s, name:%s){...repoExpand}\n' % \
+                 (gensym_counter, json.dumps(owner), json.dumps(name))
+        gensym_counter += 1
+
+    query = 'query {\n' + query + rate_limit + '\n}\n' + fragments
+    cost_guess = 2200*len(repos) + 1
+
+    return (query, cost_guess)
 
 def format_user_expander(user_logins,
                          contributions_cursors=None,
@@ -69,7 +139,7 @@ def format_user_expander(user_logins,
         if expand_pullrequests:
             sub_nodes += 'pullRequests(first: 100, after: %s) {...ownerOfRepoOfNode}\n' % json.dumps(pc)
 
-        query += 'usr%d: user(login=%s){%s}' % (gensym_counter, json.dumps(user), sub_nodes)
+        query += 'usr%d: user(login=%s){%s}\n' % (gensym_counter, json.dumps(user), sub_nodes)
         gensym_counter += 1
 
     query += '''
