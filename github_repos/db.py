@@ -1,5 +1,5 @@
 from sqlalchemy import Table, Column, ForeignKey
-from sqlalchemy import Integer, SmallInteger, String, Boolean
+from sqlalchemy import Integer, SmallInteger, BigInteger, String, Boolean
 from sqlalchemy import create_engine
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.ext.associationproxy import association_proxy
@@ -67,6 +67,13 @@ class ReposTodo(Base):
     repo_id = Column('repo_id', Integer, ForeignKey('repositories.id'), unique=True)
     repo = relationship('Repo', uselist=False)
 
+class RepoError(Base):
+    __tablename__ = 'repo_errors'
+
+    id = Column('id', Integer, primary_key=True)
+    repo_id = Column('repo_id', Integer, ForeignKey('repositories.id'), unique=True)
+    repo = relationship('Repo', uselist=False)
+
 class Language(Base):
     __tablename__ = 'languages'
 
@@ -86,10 +93,10 @@ class QueryCost(Base):
 class RepoLanguages(Base):
     __tablename__ = 'repo_languages'
 
-    id = Column('id', Integer, primary_key=True)
+    id = Column('id', BigInteger, primary_key=True)
     repo_id = Column('repo_id', Integer, ForeignKey('repositories.id'), index=True)
     lang_id = Column('lang_id', Integer, ForeignKey('languages.id'), index=True)
-    bytes_used = Column('bytes_used', Integer)
+    bytes_used = Column('bytes_used', BigInteger)
 
     repo = relationship('Repo', back_populates='languages')
     language = relationship('Language', back_populates='repos')

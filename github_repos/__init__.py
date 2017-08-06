@@ -1,11 +1,15 @@
 import sys
+import os.path
 import logging as _logging
+import logging.handlers as _logging_handlers
+import atexit
 
 _log = _logging.getLogger()
-_log.setLevel(_logging.NOTSET)
+_log.setLevel(_logging.INFO)
 
-_log_handler = _logging.FileHandler('run.log')
-_log_handler.setFormatter(_logging.Formatter('%(asctime)s [%(name)-24.24s:%(lineno)d] [%(levelname)5.5s] %(message)s'))
+_log_handler = _logging_handlers.RotatingFileHandler(os.path.join(os.path.dirname(__file__), 'logs', 'run.log'),
+                                                     mode='a', maxBytes=1024**2, backupCount=3)
+_log_handler.setFormatter(_logging.Formatter('%(asctime)s [%(name)s:%(lineno)d] [%(levelname)s] %(message)s'))
 _log_handler.setLevel(_logging.DEBUG)
 _log.addHandler(_log_handler)
 
@@ -13,6 +17,8 @@ _console_handler = _logging.StreamHandler(sys.stdout)
 _console_handler.setFormatter(_logging.Formatter('%(message)s'))
 _console_handler.setLevel(_logging.INFO)
 _log.addHandler(_console_handler)
+
+atexit.register(_log.info, "Exiting")
 
 from . import config
 from . import db
