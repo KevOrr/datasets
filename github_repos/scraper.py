@@ -2,41 +2,83 @@ import json
 import time
 import calendar
 import sys
+import logging as _logging
 
 import requests
 from sqlalchemy import exists
 from sqlalchemy.orm.exc import NoResultFound
 
+from github_repos.db import Session
 from github_repos.db import Repo, NewRepo, ReposTodo, Owner, OwnerType
 from github_repos.db import RepoLanguages, Language, QueryCost
 import github_repos.config as g
 
+
+log = _logging.getLogger(__name__)
+
+MAX_ERRORS = 10
+class MaxErrors(RuntimeError):
+    pass
+
+class GithubTimeout(RuntimeError):
+    pass
+
+class EmptyResultError(RuntimeError):
+    pass
+
+class MainScraper():
+    def __init__(self):
+        self.session = Session()
+        self.rate_limit_remaining = 5000
+        self.last_step_empty = False
+        self.error_counter = 0
+        self.reset_time = time.time() + 3600
+
+    def do_scrape_step(self, fun, *args, **kwargs):
+        try:
+            self.rate_limit_remaining, self.reset_time = fun(*args, **kwargs)
+            if self.rate_limit_remaining <= 2:
+                now = time.gmtime()
+                sleep_time = 10 + max(0, self.reset_time - now)
+                log.info('Sleeping %d seconds until %s', sleep_time, time.asctime(time.localtime(self.reset_time)))
+                time.sleep(sleep_time)
+        except NoResultFound as e:
+            if self.last_step_empty:
+                raise e
+            self.last_step_empty = True
+        except (GithubTimeout, EmptyResultError):
+            if self.error_counter >= MAX_ERRORS:
+                raise MaxErrors()
+            self.error_counter += 1
+        else:
+            self.last_step_empty = False
+            self.error_counter = max(0, self.error_counter - 1)
+
+    def start(self):
+        log.info('Starting scraper loop')
+        log.info('Assuming %d rate limit cost remaining', self.rate_limit_remaining)
+        log.info('Assuming rate limit reset time is %s', time.asctime(time.localtime(self.reset_time)))
+
+        while True:
+            self.do_scrape_step(expand_repos_from_db, self.session, self.rate_limit_remaining)
+            self.do_scrape_step(fetch_new_repo_info, self.session, self.rate_limit_remaining)
 
 EXPAND_COST_GUESS = 18484
 EXPAND_NODES_GUESS = 38688
 EXPAND_QUERY = '''\
 query($owner:String!, $name:String!) {
     repository(owner: $owner, name: $name) {
-        mentionableUsers(first: 10) {
+        mentionableUsers(first: 5) {
             nodes {
                 ...userExpand
             }
         }
-        pullRequests(first: 10) {
-            nodes {
-                participants(first: 2) {
-                    nodes {
-                        ...userExpand
-                    }
-                }
-            }
-        }
-        stargazers(first: 100, orderBy: {field: STARRED_AT, direction: DESC}) {
+        stargazers(first: 5, orderBy: {field: STARRED_AT, direction: DESC}) {
             nodes {
                 ...userExpand
             }
         }
-        watchers(first: 100) {
+        watchers(first: 5) {
             nodes {
                 ...userExpand
             }
@@ -50,26 +92,26 @@ query($owner:String!, $name:String!) {
 }
 
 fragment userExpand on User {
-    contributedRepositories(first: 10, privacy: PUBLIC, orderBy: {field: STARGAZERS, direction: DESC}) {
+    contributedRepositories(first: 5, privacy: PUBLIC, orderBy: {field: STARGAZERS, direction: DESC}) {
         nodes {
             ...repoInfo
         }
     }
-    issues(first: 10, orderBy: {field: COMMENTS, direction: DESC}) {
+    issues(first: 5, orderBy: {field: COMMENTS, direction: DESC}) {
         nodes {
             repository {
                 ...repoInfo
             }
         }
     }
-    pullRequests(first: 10) {
+    pullRequests(first: 5) {
         nodes {
             repository {
                 ...repoInfo
             }
         }
     }
-    starredRepositories(first: 10, orderBy: {field: STARRED_AT, direction: DESC}) {
+    starredRepositories(first: 5, orderBy: {field: STARRED_AT, direction: DESC}) {
         nodes {
             ...repoInfo
         }
@@ -85,7 +127,7 @@ fragment repoInfo on Repository {
 }
 '''
 
-fetch_cost_guess = lambda n: 12*n + 1
+fetch_cost_guess = lambda n: n * 1.5 / 467.0 # Best seen so far
 fetch_nodes_guess = lambda n: 51*n + 5
 FETCH_QUERY = '''\
 query {
@@ -119,6 +161,9 @@ fragment repoInfo on Repository {
 }'''
 
 class GraphQLException(RuntimeError):
+    pass
+
+class RateLimit(RuntimeError):
     pass
 
 def send_query(query, variables=None, url=g.api_url, api_key=g.personal_token, sender=requests.post):
@@ -169,10 +214,13 @@ def get_repos_from_user_nodes(user_nodes):
 def expand_repos_from_db(session, rate_limit_remaining=5000):
     '''Expands all repos in github_repos.db.ReposTodo table.'''
 
-    try:
-        todo = session.query(ReposTodo).order_by(ReposTodo.id).first()
+    if EXPAND_COST_GUESS > rate_limit_remaining * 100:
+        raise RateLimit()
 
-        print('Expanding {}/{}...'.format(todo.repo.owner.login, todo.repo.name), end=' ')
+    try:
+        todo = session.query(ReposTodo).order_by(ReposTodo.id).offset(2).first()
+
+        log.info('Expanding %s/%s...', todo.repo.owner.login, todo.repo.name)
         sys.stdout.flush()
 
         # TODO handle weird timeout html page being returned
@@ -180,22 +228,25 @@ def expand_repos_from_db(session, rate_limit_remaining=5000):
         errors = result.get('errors', [])
         data = result['data']
 
-        if errors and data:
-            print(errors)
-        elif not data:
-            raise GraphQLException(result['errors'])
+        if errors:
+            log.error(errors)
+
+        if not data:
+            log.warning('result was empty')
+            raise EmptyResultError()
+
+        if isinstance(data, str):
+            log.error('result was text, not a dictionary. Assuming Github timed out')
+            raise GithubTimeout()
 
         repo_node = data.get('repository')
         if repo_node:
             repos = set()
 
-            repos.update(get_repos_from_user_nodes(repo_node.get('mentionableUsers', {}).get('nodes', [])))
-            repos.update(get_repos_from_user_nodes(repo_node.get('stargazers', {}).get('nodes', [])))
-            repos.update(get_repos_from_user_nodes(repo_node.get('watchers', {}).get('nodes', [])))
-            for pr in repo_node.get('pullRequests', {}).get('nodes', []):
-                repos.update(get_repos_from_user_nodes(pr.get('participants', {}).get('nodes', [])))
+            for key in ('mentionableUsers', 'stargazers', 'watchers'):
+                repos.update(get_repos_from_user_nodes(repo_node.get(key, {}).get('nodes', [])))
 
-            print('{} new repos found'.format(len(repos)))
+            log.info('%d new repos found', len(repos))
 
             # Create new owners and NewRepos
             for (owner_login, owner_type), repo_name in repos:
@@ -220,8 +271,8 @@ def expand_repos_from_db(session, rate_limit_remaining=5000):
         reset_time = calendar.timegm(rate_limit_reset_at)
         local_reset_time_str = time.asctime(time.localtime(reset_time))
 
-        print('Guessed cost {}, actual cost {}'.format(EXPAND_COST_GUESS / 100, actual_cost))
-        print('Rate limited cost {} remaining until {}'.format(rate_limit_remaining, local_reset_time_str))
+        log.info('Guessed cost %f, actual cost %d', EXPAND_COST_GUESS / 100, actual_cost)
+        log.info('Rate limited cost %d remaining until %s', rate_limit_remaining, local_reset_time_str)
         print()
 
         session.commit()
@@ -230,16 +281,19 @@ def expand_repos_from_db(session, rate_limit_remaining=5000):
         session.rollback()
         raise e
 
-    return rate_limit_remaining, reset_time, local_reset_time_str
+    return rate_limit_remaining, reset_time
 
 def fetch_new_repo_info(session, rate_limit_remaining=5000):
     per_repo_cost = 12
+    if per_repo_cost > rate_limit_remaining * 100:
+        raise RateLimit()
+
     try:
-        next_batch_size = int(rate_limit_remaining * 100 / (1 + per_repo_cost)) - 1
+        next_batch_size = min(500, int(rate_limit_remaining * 100 / (1 + per_repo_cost)) - 1)
         cost_guess = fetch_cost_guess(next_batch_size)
         todos = session.query(NewRepo).order_by(NewRepo.id).limit(next_batch_size).all()
 
-        print('Fetching {} repos...'.format(len(todos)), end=' ')
+        log.info('Fetching %d repos...', len(todos))
         sys.stdout.flush()
 
         repos_query = ''
@@ -255,10 +309,16 @@ def fetch_new_repo_info(session, rate_limit_remaining=5000):
         errors = result.get('errors', [])
         data = result['data']
 
-        if errors and data:
-            print(errors)
-        elif not data:
-            raise GraphQLException(result['errors'])
+        if errors:
+            log.error(errors)
+
+        if not data:
+            log.warning('result was empty')
+            raise EmptyResultError()
+
+        if isinstance(data, str):
+            log.error('result was text, not a dictionary. Assuming Github timed out')
+            raise GithubTimeout()
 
         for key, node in data.items():
             if not key.lower().startswith('repo'):
@@ -290,7 +350,7 @@ def fetch_new_repo_info(session, rate_limit_remaining=5000):
             new_todo = ReposTodo(repo=repo)
             session.add(new_todo)
 
-        print('done')
+        log.info('done')
 
         rate_limit_remaining = data['rateLimit']['remaining']
         rate_limit_reset_at = time.strptime(data['rateLimit']['resetAt'], "%Y-%m-%dT%H:%M:%Sz")
@@ -300,8 +360,8 @@ def fetch_new_repo_info(session, rate_limit_remaining=5000):
         reset_time = calendar.timegm(rate_limit_reset_at)
         local_reset_time_str = time.asctime(time.localtime(reset_time))
 
-        print('Guessed cost {}, actual cost {}'.format(cost_guess / 100, actual_cost))
-        print('Rate limited cost {} remaining until {}'.format(rate_limit_remaining, local_reset_time_str))
+        log.info('Guessed cost %f, actual cost %d', cost_guess / 100, actual_cost)
+        log.info('Rate limited cost %d remaining until %s', rate_limit_remaining, local_reset_time_str)
         print()
 
         session.commit()
@@ -310,4 +370,4 @@ def fetch_new_repo_info(session, rate_limit_remaining=5000):
         session.rollback()
         raise e
 
-    return rate_limit_remaining, reset_time, local_reset_time_str
+    return rate_limit_remaining, reset_time
