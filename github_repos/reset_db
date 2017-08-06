@@ -1,0 +1,24 @@
+#!/bin/bash
+
+sudo -u postgres psql github <<EOF
+drop schema public cascade;
+create schema public;
+grant all on schema public to postgres;
+grant all on schema public to public;
+EOF
+
+read -n1 -rsp $'Press any key after initializing database models\n'
+
+sudo -u postgres psql github <<EOF
+insert into public.owner_types values (1, 'User');
+select setval('public.owner_types_id_seq', 2);
+
+insert into public.owners values (1, 'KevOrr', 1);
+select setval('public.owners_id_seq', 2);
+
+insert into public.repositories (id, owner_id, name) values (1, 1, 'dotfiles');
+select setval('public.repositories_id_seq', 2);
+
+insert into public.repos_todo values (1, 1);
+select setval('public.repos_todo_id_seq', 2);
+EOF

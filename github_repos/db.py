@@ -21,16 +21,16 @@ class Repo(Base):
 
     id = Column('id', Integer, primary_key=True)
     # github_id = Column('github_id', String, unique=True)
-    name = Column('name', String, index=True)
+    name = Column('name', String, index=True, nullable=False)
     description = Column('description', String)
-    owner_id = Column('owner_id', Integer, ForeignKey('owners.id'), index=True)
+    owner_id = Column('owner_id', Integer, ForeignKey('owners.id'), index=True, nullable=False)
     disk_usage = Column('disk_usage', Integer)
     url = Column('url', String)
     is_fork = Column('is_fork', Boolean)
     is_mirror = Column('is_mirror', Boolean)
 
     owner = relationship('Owner', uselist=False)
-    languages = relationship('Language')
+    languages = relationship('RepoLanguages', back_populates='repo')
 
 class OwnerType(Base):
     __tablename__ = 'owner_types'
@@ -45,7 +45,7 @@ class Owner(Base):
     __tablename__ = 'owners'
 
     id = Column('id', Integer, primary_key=True)
-    login = Column('login', String, index=True, unique=True)
+    login = Column('login', String, index=True, unique=True, nullable=False)
     type_id = Column('type_id', SmallInteger, ForeignKey('owner_types.id'))
 
     owner_type = relationship('OwnerType', uselist=False)
@@ -71,8 +71,10 @@ class Language(Base):
     __tablename__ = 'languages'
 
     id = Column('id', Integer, primary_key=True)
-    name = Column('name', String)
+    name = Column('name', String, unique=True)
     color = Column('color', String)
+
+    repos = relationship('RepoLanguages', back_populates='language')
 
 class QueryCost(Base):
     __tablename__ = 'query_costs'
@@ -81,9 +83,15 @@ class QueryCost(Base):
     guess = Column('guess', Integer)
     normalized_actual = Column('normalized_actual', Integer)
 
-repo_languages = Table('repo_languages', Base.metadata,
-                       Column('repo_id', Integer, ForeignKey('repositories.id'), index=True),
-                       Column('lang_id', Integer, ForeignKey('languages.id'), index=True),
-                       Column('rank', Integer))
+class RepoLanguages(Base):
+    __tablename__ = 'repo_languages'
+
+    id = Column('id', Integer, primary_key=True)
+    repo_id = Column('repo_id', Integer, ForeignKey('repositories.id'), index=True)
+    lang_id = Column('lang_id', Integer, ForeignKey('languages.id'), index=True)
+    bytes_used = Column('bytes_used', Integer)
+
+    repo = relationship('Repo', back_populates='languages')
+    language = relationship('Language', back_populates='repos')
 
 Base.metadata.create_all(engine)
