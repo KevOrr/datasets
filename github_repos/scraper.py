@@ -17,7 +17,7 @@ import github_repos.config as g
 
 log = _logging.getLogger(__name__)
 
-MAX_EXPAND_ERRORS = 5
+MAX_EXPAND_ERRORS = 2
 MAX_FETCH_ERRORS = 30
 class MaxErrors(RuntimeError):
     pass
@@ -32,73 +32,12 @@ class EmptyResultError(RuntimeError):
         RuntimeError.__init__(self)
         self.todo = todo
 
-class MainScraper():
-    def __init__(self):
-        self.session = Session()
-        self.rate_limit_remaining = 5000
-        self.last_step_empty = False
-        self.expand_errors = {}
-        self.fetch_errors = 0
-        self.reset_time = time.time() + 3600
+class GraphQLException(RuntimeError):
+    pass
 
-    def rate_limit_sleep(self):
-        now = time.time()
-        sleep_time = 10 + max(0, self.reset_time - now)
-        log.info('Sleeping %d seconds until %s', sleep_time, time.asctime(time.localtime(self.reset_time)))
-        time.sleep(sleep_time)
+class RateLimit(RuntimeError):
+    pass
 
-
-    def do_scrape_step(self, fun, *args, **kwargs):
-        try:
-            self.rate_limit_remaining, self.reset_time = fun(*args, **kwargs)
-            if self.rate_limit_remaining <= 2:
-                self.rate_limit_sleep()
-
-        except RateLimit:
-            self.rate_limit_sleep()
-
-        except NoResultFound as e:
-            if self.last_step_empty:
-                raise e
-            self.last_step_empty = True
-
-        except (GithubTimeout, EmptyResultError) as e:
-            todo = e.todo
-            if isinstance(todo, list):
-                self.fetch_errors += 1
-                log.error('Error count for fetching is %d', self.fetch_errors)
-
-                if self.fetch_errors > MAX_FETCH_ERRORS:
-                    # Unacceptable!
-                    raise MaxErrors()
-
-            elif isinstance(todo, ReposTodo):
-                self.expand_errors.setdefault(todo.id, 0)
-                self.expand_errors[todo.id] += 1
-                log.error('Error count for expanding %s/%s is %d',
-                          todo.repo.owner.login, todo.repo.name, self.expand_errors[todo.id])
-
-                if self.expand_errors[todo.id] > MAX_EXPAND_ERRORS:
-                    with self.session.begin_nested():
-                        self.session.add(RepoError(repo=todo.repo))
-                        self.session.delete(todo)
-                    self.session.commit()
-
-        else:
-            self.last_step_empty = False
-            if fun is fetch_new_repo_info:
-                self.fetch_errors = max(0, self.fetch_errors - 1)
-
-        print()
-
-    def start(self):
-        log.info('Starting scraper loop')
-        log.info('Assuming %d rate limit cost remaining', self.rate_limit_remaining)
-        log.info('Assuming rate limit reset time is %s', time.asctime(time.localtime(self.reset_time)))
-
-        while True:
-            self.do_scrape_step(expand_repos_from_db, self.session, self.rate_limit_remaining)
-            self.do_scrape_step(fetch_new_repo_info, self.session, self.rate_limit_remaining)
 
 EXPAND_COST_GUESS = 1300
 EXPAND_QUERY = '''\
@@ -195,11 +134,16 @@ fragment repoInfo on Repository {
     }
 }'''
 
-class GraphQLException(RuntimeError):
-    pass
+RATE_LIMIT_QUERY = '''\
+query {
+    rateLimit {
+        resetAt
+    }
+}'''
 
-class RateLimit(RuntimeError):
-    pass
+
+def strp_reset_time(time_str):
+    return time.strptime(time_str, "%Y-%m-%dT%H:%M:%Sz")
 
 def send_query(query, variables=None, url=g.api_url, api_key=g.personal_token, sender=requests.post):
     if not isinstance(query, str):
@@ -212,24 +156,6 @@ def send_query(query, variables=None, url=g.api_url, api_key=g.personal_token, s
         result = sender(url, headers=headers, data=json.dumps({'query': query})).json()
 
     return result
-
-
-def owner_exists(session, login):
-    return session.query(exists().where(Owner.login == login)).scalar()
-
-def repo_fetched(session, owner_login, repo_name):
-    return session.query(
-        session.query(Owner).filter_by(login=owner_login).join(Repo).filter_by(name=repo_name).exists()
-    ).scalar()
-
-def repo_found_not_fetched(session, owner_login, repo_name):
-    return session.query(
-        session.query(Owner).filter_by(login=owner_login).join(NewRepo).filter(NewRepo.name == repo_name).exists()
-    ).scalar()
-
-def repo_exists(session, owner_login, repo_name):
-    return repo_fetched(session, owner_login, repo_name) or repo_found_not_fetched(session, owner_login, repo_name)
-
 
 def get_repos_from_user_nodes(user_nodes):
     repos = set()
@@ -248,165 +174,270 @@ def get_repos_from_user_nodes(user_nodes):
     return repos, count
 
 
-def expand_repos_from_db(session, rate_limit_remaining=5000):
-    '''Expands all repos in github_repos.db.ReposTodo table.'''
+class MainScraper():
+    def __init__(self):
+        self.session = Session()
+        self.rate_limit_remaining = 5000
+        self.expand_errors = {}
+        self.fetch_errors = 0
+        self.reset_time = time.time() + 3600
 
-    if EXPAND_COST_GUESS > rate_limit_remaining * 100 or rate_limit_remaining <= 2:
-        raise RateLimit()
 
-    try:
-        todo = session.query(ReposTodo).order_by(ReposTodo.id).first()
+    def owner_exists(self, login):
+        return self.session.query(exists().where(Owner.login == login)).scalar()
 
-        log.info('Expanding %s/%s...', todo.repo.owner.login, todo.repo.name)
-        sys.stdout.flush()
+    def repo_fetched(self, owner_login, repo_name):
+        return self.session.query(
+            self.session.query(Owner).filter_by(login=owner_login).join(Repo).filter_by(name=repo_name).exists()
+        ).scalar()
 
-        # TODO handle weird timeout html page being returned
-        result = send_query(EXPAND_QUERY, {'owner': todo.repo.owner.login, 'name': todo.repo.name})
-        errors = result.get('errors', [])
-        data = result['data']
+    def repo_found_not_fetched(self, owner_login, repo_name):
+        return self.session.query(
+            self.session.query(Owner).filter_by(login=owner_login).join(NewRepo).filter(NewRepo.name == repo_name).exists()
+        ).scalar()
 
-        if errors:
-            log.error(errors)
+    def repo_exists(self, owner_login, repo_name):
+        return self.repo_fetched(owner_login, repo_name) or self.repo_found_not_fetched(owner_login, repo_name)
 
-        if not data:
-            log.warning('result was empty')
-            raise EmptyResultError(todo)
 
-        if isinstance(data, str):
-            log.error('result was text, not a dictionary. Assuming Github timed out')
-            raise GithubTimeout(todo)
+    def rate_limit_sleep(self):
+        result = send_query(RATE_LIMIT_QUERY)
+        if 'data' in result and 'rateLimit' in result['data'] and 'resetAt' in result['data']['rateLimit']:
+            self.reset_time = calendar.timegm(strp_reset_time(result['data']['rateLimit']['resetAt']))
 
-        repo_node = data.get('repository')
-        if repo_node:
-            repos = set()
-            count = 0
+        now = time.time()
+        sleep_time = 60 + self.reset_time - now
+        log.info('Sleeping %d seconds until %s', sleep_time, time.asctime(time.localtime(now + sleep_time)))
+        time.sleep(sleep_time)
+        self.rate_limit_remaining = 5000
 
-            for key in ('mentionableUsers', 'stargazers', 'watchers'):
-                new_repos, new_count = get_repos_from_user_nodes(repo_node.get(key, {}).get('nodes', []))
-                repos.update(new_repos)
-                count += new_count
 
-            new_count = 0
-            # Create new owners and NewRepos
-            for (owner_login, owner_type), repo_name in repos:
-                if not owner_exists(session, owner_login):
-                    assert owner_type.lower() in ('user', 'organization')
-                    owner = Owner(login=owner_login, type_id=session.query(OwnerType.id).filter_by(typename=owner_type).scalar())
-                    session.add(owner)
-                else:
-                    owner = session.query(Owner).filter_by(login=owner_login).one()
+    def expand_repos_from_db(self):
+        '''Expands all repos in github_repos.db.ReposTodo table.'''
 
-                if not repo_exists(session, owner_login, repo_name):
-                    session.add(NewRepo(owner=owner, name=repo_name))
-                    new_count += 1
+        if EXPAND_COST_GUESS > self.rate_limit_remaining * 100 or self.rate_limit_remaining <= 2:
+            raise RateLimit()
 
-            log.info('%d repo nodes returned, %d unique, %d new', count, len(repos), new_count)
+        try:
+            todo = self.session.query(ReposTodo).order_by(ReposTodo.id).first()
 
-            # Delete todos
-            session.query(ReposTodo).filter(ReposTodo.id == todo.id).delete(synchronize_session='fetch')
+            log.info('Expanding %s/%s...', todo.repo.owner.login, todo.repo.name)
+            sys.stdout.flush()
 
-        rate_limit_remaining = data['rateLimit']['remaining']
-        rate_limit_reset_at = time.strptime(data['rateLimit']['resetAt'], "%Y-%m-%dT%H:%M:%Sz")
-        actual_cost = data['rateLimit']['cost']
-        session.add(QueryCost(guess=EXPAND_COST_GUESS, normalized_actual=actual_cost))
+            # TODO handle weird timeout html page being returned
+            result = send_query(EXPAND_QUERY, {'owner': todo.repo.owner.login, 'name': todo.repo.name})
+            errors = result.get('errors', [])
+            data = result['data']
 
-        reset_time = calendar.timegm(rate_limit_reset_at)
-        local_reset_time_str = time.asctime(time.localtime(reset_time))
+            if errors:
+                log.error(errors)
+                for error in errors:
+                    if 'type' in error and error['type'].lower() == 'rate_limited':
+                        raise RateLimit()
 
-        log.info('Guessed cost %f, actual cost %d', EXPAND_COST_GUESS / 100, actual_cost)
-        log.info('Rate limited cost %d remaining until %s', rate_limit_remaining, local_reset_time_str)
+            if not data:
+                log.warning('result was empty')
+                raise EmptyResultError(todo)
 
-        session.commit()
+            if isinstance(data, str):
+                log.error('result was text, not a dictionary. Assuming Github timed out')
+                raise GithubTimeout(todo)
 
-    except Exception as e:
-        session.rollback()
-        raise e
+            repo_node = data.get('repository')
+            if repo_node:
+                repos = set()
+                count = 0
 
-    return rate_limit_remaining, reset_time
+                for key in ('mentionableUsers', 'stargazers', 'watchers'):
+                    new_repos, new_count = get_repos_from_user_nodes(repo_node.get(key, {}).get('nodes', []))
+                    repos.update(new_repos)
+                    count += new_count
 
-def fetch_new_repo_info(session, rate_limit_remaining=5000):
-    if rate_limit_remaining <= 2:
-        raise RateLimit()
+                new_count = 0
+                # Create new owners and NewRepos
+                for (owner_login, owner_type), repo_name in repos:
+                    if not self.owner_exists(owner_login):
+                        assert owner_type.lower() in ('user', 'organization')
+                        owner = Owner(login=owner_login, type_id=self.session.query(OwnerType.id).filter_by(typename=owner_type).scalar())
+                        self.session.add(owner)
+                    else:
+                        owner = self.session.query(Owner).filter_by(login=owner_login).one()
 
-    try:
-        next_batch_size = max(0, min(500, int(rate_limit_remaining * 100) - 1))
-        cost_guess = fetch_cost_guess(next_batch_size)
-        todos = session.query(NewRepo).order_by(NewRepo.id).limit(next_batch_size).all()
+                    if not self.repo_exists(owner_login, repo_name):
+                        self.session.add(NewRepo(owner=owner, name=repo_name))
+                        new_count += 1
 
-        log.info('Fetching %d repos...', len(todos))
-        sys.stdout.flush()
+                log.info('%d repo nodes returned, %d unique, %d new', count, len(repos), new_count)
 
-        repos_query = ''
-        gensym_counter = 1
-        for todo in todos:
-            repos_query += '    repo%d: repository(owner: %s, name: %s) {...repoInfo}\n' % (
-                gensym_counter, json.dumps(todo.owner.login), json.dumps(todo.name))
-            gensym_counter += 1
+                # Delete todos
+                self.session.query(ReposTodo).filter(ReposTodo.id == todo.id).delete(synchronize_session='fetch')
 
-        query = FETCH_QUERY % repos_query
+            self.rate_limit_remaining = data['rateLimit']['remaining']
+            rate_limit_reset_at = strp_reset_time(data['rateLimit']['resetAt'])
+            actual_cost = data['rateLimit']['cost']
+            self.session.add(QueryCost(guess=EXPAND_COST_GUESS, normalized_actual=actual_cost))
 
-        result = send_query(query)
-        errors = result.get('errors', [])
-        data = result['data']
+            self.reset_time = calendar.timegm(rate_limit_reset_at)
+            local_reset_time_str = time.asctime(time.localtime(self.reset_time))
 
-        if errors:
-            log.error(errors)
+            log.info('Guessed cost %f, actual cost %d', EXPAND_COST_GUESS / 100, actual_cost)
+            log.info('Rate limited cost %d remaining until %s', self.rate_limit_remaining, local_reset_time_str)
 
-        if not data:
-            log.warning('result was empty')
-            raise EmptyResultError(todos)
+            self.session.commit()
 
-        if isinstance(data, str):
-            log.error('result was text, not a dictionary. Assuming Github timed out')
-            raise GithubTimeout(todos)
+        except Exception as e:
+            self.session.rollback()
+            raise e
 
-        for key, node in data.items():
-            if not key.lower().startswith('repo'):
-                continue
+    def fetch_new_repo_info(self):
+        if self.rate_limit_remaining <= 2:
+            raise RateLimit()
 
+        try:
+            next_batch_size = max(0, min(500, int(self.rate_limit_remaining * 100) - 1))
+            cost_guess = fetch_cost_guess(next_batch_size)
+            todos = self.session.query(NewRepo).order_by(NewRepo.id).limit(next_batch_size).all()
+
+            log.info('Fetching %d repos...', len(todos))
+            sys.stdout.flush()
+
+            repos_query = ''
+            gensym_counter = 1
             for todo in todos:
-                if todo.name == node['name'] and todo.owner.login == node['owner']['login']:
-                    session.delete(todo)
+                repos_query += '    repo%d: repository(owner: %s, name: %s) {...repoInfo}\n' % (
+                    gensym_counter, json.dumps(todo.owner.login), json.dumps(todo.name))
+                gensym_counter += 1
 
-            repo = Repo(name=node['name'],
-                        owner=session.query(Owner).filter_by(login=node['owner']['login']).one(),
-                        description=node['description'],
-                        disk_usage=node['diskUsage'],
-                        url=node['url'],
-                        is_fork=node['isFork'],
-                        is_mirror=node['isMirror'])
+            query = FETCH_QUERY % repos_query
 
-            for lang_edge in node.get('languages', {}).get('edges', []):
+            result = send_query(query)
+            errors = result.get('errors', [])
+            data = result['data']
+
+            if errors:
+                log.error(errors)
+                for error in errors:
+                    if 'type' in error and error['type'].lower() == 'rate_limited':
+                        raise RateLimit()
+
+            if not data:
+                log.warning('result was empty')
+                raise EmptyResultError(todos)
+
+            if isinstance(data, str):
+                log.error('result was text, not a dictionary. Assuming Github timed out')
+                raise GithubTimeout(todos)
+
+            for key, node in data.items():
+                if not key.lower().startswith('repo'):
+                    continue
+
+                for todo in todos:
+                    if todo.name == node['name'] and todo.owner.login == node['owner']['login']:
+                        self.session.delete(todo)
+
+                repo = Repo(name=node['name'],
+                            owner=self.session.query(Owner).filter_by(login=node['owner']['login']).one(),
+                            description=node['description'],
+                            disk_usage=node['diskUsage'],
+                            url=node['url'],
+                            is_fork=node['isFork'],
+                            is_mirror=node['isMirror'])
+
+                for lang_edge in node.get('languages', {}).get('edges', []):
+                    try:
+                        lang = self.session.query(Language).filter_by(name=lang_edge['node']['name']).one()
+                    except NoResultFound:
+                        lang = Language(name=lang_edge['node']['name'], color=lang_edge['node']['color'])
+
+                    repo_lang = RepoLanguages(repo=repo, language=lang, bytes_used=lang_edge['size'])
+                    self.session.add(repo_lang)
+
+                self.session.add(repo)
+
+                new_todo = ReposTodo(repo=repo)
+                self.session.add(new_todo)
+
+            log.info('done')
+
+            self.rate_limit_remaining = data['rateLimit']['remaining']
+            rate_limit_reset_at = strp_reset_time(data['rateLimit']['resetAt'])
+            actual_cost = data['rateLimit']['cost']
+            self.session.add(QueryCost(guess=cost_guess, normalized_actual=actual_cost))
+
+            self.reset_time = calendar.timegm(rate_limit_reset_at)
+            local_reset_time_str = time.asctime(time.localtime(self.reset_time))
+
+            log.info('Guessed cost %f, actual cost %d', cost_guess / 100, actual_cost)
+            log.info('Rate limited cost %d remaining until %s', self.rate_limit_remaining, local_reset_time_str)
+
+            self.session.commit()
+
+        except Exception as e:
+            self.session.rollback()
+            raise e
+
+
+    def start(self):
+        log.info('Starting scraper loop')
+        log.info('Assuming %d rate limit cost remaining', self.rate_limit_remaining)
+        log.info('Assuming rate limit reset time is %s', time.asctime(time.localtime(self.reset_time)))
+
+        last_step_empty = False
+        while True:
+            # Expansion step
+            if self.session.query(ReposTodo).first() is None:
+                log.info('No repos to expand. Skipping expansion step')
+                if last_step_empty:
+                    return
+                last_step_empty = True
+            else:
                 try:
-                    lang = session.query(Language).filter_by(name=lang_edge['node']['name']).one()
-                except NoResultFound:
-                    lang = Language(name=lang_edge['node']['name'], color=lang_edge['node']['color'])
+                    self.expand_repos_from_db()
 
-                repo_lang = RepoLanguages(repo=repo, language=lang, bytes_used=lang_edge['size'])
-                session.add(repo_lang)
+                except RateLimit:
+                    self.rate_limit_sleep()
 
-            session.add(repo)
+                except (GithubTimeout, EmptyResultError) as e:
+                    todo = e.todo
+                    self.expand_errors.setdefault(todo.id, 0)
+                    self.expand_errors[todo.id] += 1
+                    log.error('Error count for expanding %s/%s is %d',
+                              todo.repo.owner.login, todo.repo.name, self.expand_errors[todo.id])
 
-            new_todo = ReposTodo(repo=repo)
-            session.add(new_todo)
+                    if self.expand_errors[todo.id] > MAX_EXPAND_ERRORS:
+                        with self.session.begin_nested():
+                            self.session.add(RepoError(repo=todo.repo))
+                            self.session.delete(todo)
+                        self.session.commit()
 
-        log.info('done')
+                last_step_empty = False
 
-        rate_limit_remaining = data['rateLimit']['remaining']
-        rate_limit_reset_at = time.strptime(data['rateLimit']['resetAt'], "%Y-%m-%dT%H:%M:%Sz")
-        actual_cost = data['rateLimit']['cost']
-        session.add(QueryCost(guess=cost_guess, normalized_actual=actual_cost))
+            print()
 
-        reset_time = calendar.timegm(rate_limit_reset_at)
-        local_reset_time_str = time.asctime(time.localtime(reset_time))
+            # Fetching step
+            if self.session.query(NewRepo).first() is None:
+                log.info('No repos to fetch. Skipping fetching step')
+                if last_step_empty:
+                    return
+                last_step_empty = True
+            else:
+                try:
+                    self.fetch_new_repo_info()
 
-        log.info('Guessed cost %f, actual cost %d', cost_guess / 100, actual_cost)
-        log.info('Rate limited cost %d remaining until %s', rate_limit_remaining, local_reset_time_str)
+                except RateLimit:
+                    self.rate_limit_sleep()
 
-        session.commit()
+                except (GithubTimeout, EmptyResultError) as e:
+                    todo = e.todo
+                    self.fetch_errors += 1
+                    log.error('Error count for fetching is %d', self.fetch_errors)
 
-    except Exception as e:
-        session.rollback()
-        raise e
+                    if self.fetch_errors > MAX_FETCH_ERRORS:
+                        # Unacceptable!
+                        raise MaxErrors()
 
-    return rate_limit_remaining, reset_time
+                last_step_empty = False
+
+            print()
+            print()
