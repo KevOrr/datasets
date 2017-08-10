@@ -42,63 +42,63 @@ class RateLimit(RuntimeError):
 EXPAND_COST_GUESS = 1300
 EXPAND_QUERY = '''\
 query($owner:String!, $name:String!) {
-    repository(owner: $owner, name: $name) {
-        mentionableUsers(first: 5) {
-            nodes {
-                ...userExpand
-            }
-        }
-        stargazers(first: 5, orderBy: {field: STARRED_AT, direction: DESC}) {
-            nodes {
-                ...userExpand
-            }
-        }
-        watchers(first: 5) {
-            nodes {
-                ...userExpand
-            }
-        }
+  repository(owner: $owner, name: $name) {
+    mentionableUsers(first: 5) {
+      nodes {
+        ...userExpand
+      }
     }
-    rateLimit {
-        cost
-        remaining
-        resetAt
+    stargazers(first: 5, orderBy: {field: STARRED_AT, direction: DESC}) {
+      nodes {
+        ...userExpand
+      }
     }
+    watchers(first: 5) {
+      nodes {
+        ...userExpand
+      }
+    }
+  }
+  rateLimit {
+    cost
+    remaining
+    resetAt
+  }
 }
 
 fragment userExpand on User {
-    contributedRepositories(first: 10, privacy: PUBLIC, orderBy: {field: STARGAZERS, direction: DESC}) {
-        nodes {
-            ...repoInfo
-        }
+  contributedRepositories(first: 10, privacy: PUBLIC, orderBy: {field: STARGAZERS, direction: DESC}) {
+    nodes {
+      ...repoInfo
     }
-    issues(first: 20, orderBy: {field: COMMENTS, direction: DESC}) {
-        nodes {
-            repository {
-                ...repoInfo
-            }
-        }
+  }
+  issues(first: 20, orderBy: {field: COMMENTS, direction: DESC}) {
+    nodes {
+      repository {
+        ...repoInfo
+      }
     }
-    pullRequests(first: 20) {
-        nodes {
-            repository {
-                ...repoInfo
-            }
-        }
+  }
+  pullRequests(first: 20) {
+    nodes {
+      repository {
+        ...repoInfo
+      }
     }
-    starredRepositories(first: 20, orderBy: {field: STARRED_AT, direction: DESC}) {
-        nodes {
-            ...repoInfo
-        }
+  }
+  starredRepositories(first: 20, orderBy: {field: STARRED_AT, direction: DESC}) {
+    nodes {
+      ...repoInfo
     }
+  }
 }
 
 fragment repoInfo on Repository {
-    name
-    owner {
-        __typename
-        login
-    }
+  name
+  owner {
+    __typename
+    login
+  }
 }
 '''
 
@@ -106,39 +106,39 @@ fetch_cost_guess = lambda n: n * 1.5 / 467.0 # Best seen so far
 FETCH_QUERY = '''\
 query {
 %s
-    rateLimit {
-        cost
-        remaining
-        resetAt
-    }
+  rateLimit {
+    cost
+    remaining
+    resetAt
+  }
 }
 
 fragment repoInfo on Repository {
-    name
-    owner {
-        login
+  name
+  owner {
+    login
+  }
+  description
+  diskUsage
+  url
+  isFork
+  isMirror
+  languages(first: 10, orderBy: {field: SIZE, direction: DESC}) {
+    edges {
+      size
+      node {
+        name
+        color
+      }
     }
-    description
-    diskUsage
-    url
-    isFork
-    isMirror
-    languages(first: 10, orderBy: {field: SIZE, direction: DESC}) {
-        edges {
-            size
-            node {
-                name
-                color
-            }
-        }
-    }
+  }
 }'''
 
 RATE_LIMIT_QUERY = '''\
 query {
-    rateLimit {
-        resetAt
-    }
+  rateLimit {
+    resetAt
+  }
 }'''
 
 
