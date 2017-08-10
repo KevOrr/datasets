@@ -163,15 +163,20 @@ query {
 def strp_reset_time(time_str):
     return time.strptime(time_str, "%Y-%m-%dT%H:%M:%Sz")
 
-def send_query(query, variables=None, url=g.api_url, api_key=g.personal_token, sender=requests.post):
+def send_query(query, variables=None, url=g.api_url, raw=False, api_key=g.personal_token, sender=requests.post):
     if not isinstance(query, str):
         query = query.format()
 
     headers = {'Authorization': 'bearer ' + api_key}
     if variables:
-        result = sender(url, headers=headers, data=json.dumps({'query': query, 'variables': variables})).json()
+        result = sender(url, headers=headers, data=json.dumps({'query': query, 'variables': variables}))
     else:
-        result = sender(url, headers=headers, data=json.dumps({'query': query})).json()
+        result = sender(url, headers=headers, data=json.dumps({'query': query}))
+
+    if raw:
+        result = result.text
+    else:
+        result = result.json()
 
     return result
 
@@ -224,7 +229,7 @@ class MainScraper():
             self.reset_time = calendar.timegm(strp_reset_time(result['data']['rateLimit']['resetAt']))
 
         now = time.time()
-        sleep_time = 60 + self.reset_time - now
+        sleep_time = 30 + self.reset_time - now
         log.info('Sleeping %d seconds until %s', sleep_time, time.asctime(time.localtime(now + sleep_time)))
         time.sleep(sleep_time)
         self.rate_limit_remaining = 5000
@@ -310,23 +315,32 @@ class MainScraper():
 
                 # Delete todos
                 self.session.query(ReposTodo).filter(ReposTodo.id == todo.id).delete(synchronize_session='fetch')
-
-            self.rate_limit_remaining = data['rateLimit']['remaining']
-            rate_limit_reset_at = strp_reset_time(data['rateLimit']['resetAt'])
-            actual_cost = data['rateLimit']['cost']
-            self.session.add(QueryCost(guess=EXPAND_COST_GUESS, normalized_actual=actual_cost))
-
-            self.reset_time = calendar.timegm(rate_limit_reset_at)
-            local_reset_time_str = time.asctime(time.localtime(self.reset_time))
-
-            log.info('Guessed cost %f, actual cost %d', EXPAND_COST_GUESS / 100, actual_cost)
-            log.info('Rate limited cost %d remaining until %s', self.rate_limit_remaining, local_reset_time_str)
+            else:
+                log.warning('result was empty')
+                raise EmptyResultError(todo)
 
             self.session.commit()
 
         except Exception as e:
             self.session.rollback()
             raise e
+
+        finally:
+            try:
+                self.rate_limit_remaining = data['rateLimit']['remaining']
+                rate_limit_reset_at = strp_reset_time(data['rateLimit']['resetAt'])
+                actual_cost = data['rateLimit']['cost']
+                self.session.add(QueryCost(guess=EXPAND_COST_GUESS, normalized_actual=actual_cost))
+
+                self.reset_time = calendar.timegm(rate_limit_reset_at)
+                local_reset_time_str = time.asctime(time.localtime(self.reset_time))
+
+                log.info('Guessed cost %f, actual cost %d', EXPAND_COST_GUESS / 100, actual_cost)
+                log.info('Rate limited cost %d remaining until %s', self.rate_limit_remaining, local_reset_time_str)
+            except Exception as e:
+                log.error(e)
+                log.error('Could not get latest remaining query cost. `data` is probably None')
+
 
     def fetch_new_repo_info(self):
         if self.rate_limit_remaining <= 2:
@@ -423,60 +437,65 @@ class MainScraper():
         log.info('Assuming rate limit reset time is %s', time.asctime(time.localtime(self.reset_time)))
 
         last_step_empty = False
-        while True:
-            # Expansion step
-            if self.session.query(ReposTodo).first() is None:
-                log.info('No repos to expand. Skipping expansion step')
-                if last_step_empty:
-                    return
-                last_step_empty = True
-            else:
-                try:
-                    self.expand_repos_from_db()
+        try:
+            while True:
+                # Expansion step
+                if self.session.query(ReposTodo).first() is None:
+                    log.info('No repos to expand. Skipping expansion step')
+                    if last_step_empty:
+                        return
+                    last_step_empty = True
+                else:
+                    try:
+                        self.expand_repos_from_db()
 
-                except RateLimit:
-                    self.rate_limit_sleep()
+                    except RateLimit:
+                        self.rate_limit_sleep()
 
-                except (GithubTimeout, EmptyResultError) as e:
-                    todo = e.todo
-                    self.expand_errors.setdefault(todo.id, 0)
-                    self.expand_errors[todo.id] += 1
-                    log.error('Error count for expanding %s/%s is %d',
-                              todo.repo.owner.login, todo.repo.name, self.expand_errors[todo.id])
+                    except (GithubTimeout, EmptyResultError) as e:
+                        todo = e.todo
+                        self.expand_errors.setdefault(todo.id, 0)
+                        self.expand_errors[todo.id] += 1
+                        log.error('Error count for expanding %s/%s is %d',
+                                  todo.repo.owner.login, todo.repo.name, self.expand_errors[todo.id])
 
-                    if self.expand_errors[todo.id] > MAX_EXPAND_ERRORS:
-                        with self.session.begin_nested():
-                            self.session.add(RepoError(repo=todo.repo))
-                            self.session.delete(todo)
-                        self.session.commit()
+                        if self.expand_errors[todo.id] > MAX_EXPAND_ERRORS:
+                            with self.session.begin_nested():
+                                self.session.add(RepoError(repo=todo.repo))
+                                self.session.delete(todo)
+                            self.session.commit()
 
-                last_step_empty = False
+                    last_step_empty = False
 
-            print()
+                print()
 
-            # Fetching step
-            if self.session.query(NewRepo).first() is None:
-                log.info('No repos to fetch. Skipping fetching step')
-                if last_step_empty:
-                    return
-                last_step_empty = True
-            else:
-                try:
-                    self.fetch_new_repo_info()
+                # Fetching step
+                if self.session.query(NewRepo).first() is None:
+                    log.info('No repos to fetch. Skipping fetching step')
+                    if last_step_empty:
+                        return
+                    last_step_empty = True
+                else:
+                    try:
+                        self.fetch_new_repo_info()
 
-                except RateLimit:
-                    self.rate_limit_sleep()
+                    except RateLimit:
+                        self.rate_limit_sleep()
 
-                except (GithubTimeout, EmptyResultError) as e:
-                    todo = e.todo
-                    self.fetch_errors += 1
-                    log.error('Error count for fetching is %d', self.fetch_errors)
+                    except (GithubTimeout, EmptyResultError) as e:
+                        todo = e.todo
+                        self.fetch_errors += 1
+                        log.error('Error count for fetching is %d', self.fetch_errors)
 
-                    if self.fetch_errors > MAX_FETCH_ERRORS:
-                        # Unacceptable!
-                        raise MaxErrors()
+                        if self.fetch_errors > MAX_FETCH_ERRORS:
+                            # Unacceptable!
+                            raise MaxErrors()
 
-                last_step_empty = False
+                    last_step_empty = False
 
-            print()
-            print()
+                print()
+                print()
+
+        except Exception as e:
+            log.error(e)
+            raise e
