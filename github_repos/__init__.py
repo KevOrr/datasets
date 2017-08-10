@@ -18,7 +18,9 @@ _console_handler.setFormatter(_logging.Formatter('%(message)s'))
 _console_handler.setLevel(_logging.INFO)
 _log.addHandler(_console_handler)
 
-atexit.register(_log.info, "Exiting")
+log = _logging.getLogger(__name__)
+
+atexit.register(log.info, "Exiting")
 
 from . import config
 from . import db
@@ -28,7 +30,7 @@ from . import scraper
 
 
 def reload():
-    _log.info('Reloading main module')
+    log.info('Reloading main module')
     import importlib
     importlib.reload(config)
     importlib.reload(db)
