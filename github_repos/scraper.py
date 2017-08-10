@@ -39,6 +39,24 @@ class RateLimit(RuntimeError):
     pass
 
 
+POPULAR_REPOS_QUERY = '''\
+query {
+  search(type: REPOSITORY, query: "stars:>1 sort:stars", first: 100) {
+    nodes {
+      ...on Repository {
+        name
+        stargazers() {
+          totalCount
+        }
+        owner {
+          __typename
+          login
+        }
+      }
+    }
+  }
+}'''
+
 EXPAND_COST_GUESS = 1300
 EXPAND_QUERY = '''\
 query($owner:String!, $name:String!) {
@@ -211,6 +229,27 @@ class MainScraper():
         time.sleep(sleep_time)
         self.rate_limit_remaining = 5000
 
+
+    def populate_most_popular(self):
+        '''Gets 100 most starred repos from github search'''
+
+        result = send_query(POPULAR_REPOS_QUERY)
+
+        with self.session.begin_nested():
+            for repo in sorted(result.get('data', {}).get('search', {}).get('nodes', []),
+                               key=lambda repo:repo['stargazers']['totalCount'],
+                               reverse=True):
+                try:
+                    owner = self.session.query(Owner).filter_by(login=repo['owner']['login']).one()
+                except NoResultFound:
+                    owner = Owner(login=repo['owner']['login'],
+                                  owner_type=self.session.query(OwnerType).filter_by(typename=repo['owner']['__typename']).one())
+                    self.session.add(owner)
+
+                new_repo = NewRepo(name=repo['name'], owner=owner)
+                self.session.add(new_repo)
+
+        self.session.commit()
 
     def expand_repos_from_db(self):
         '''Expands all repos in github_repos.db.ReposTodo table.'''
