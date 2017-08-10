@@ -1,4 +1,4 @@
-from sqlalchemy import Table, Column, ForeignKey
+from sqlalchemy import Column, ForeignKey
 from sqlalchemy import Integer, SmallInteger, BigInteger, String, Boolean
 from sqlalchemy import create_engine
 from sqlalchemy.ext.declarative import declarative_base
@@ -72,6 +72,8 @@ class RepoError(Base):
 
     id = Column('id', Integer, primary_key=True)
     repo_id = Column('repo_id', Integer, ForeignKey('repositories.id'), unique=True)
+    error_text = Column('error_text', String, nullable=True)
+
     repo = relationship('Repo', uselist=False)
 
 class Language(Base):

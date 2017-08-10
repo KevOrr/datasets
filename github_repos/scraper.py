@@ -23,14 +23,16 @@ class MaxErrors(RuntimeError):
     pass
 
 class GithubTimeout(RuntimeError):
-    def __init__(self, todo):
-        RuntimeError.__init__(self)
+    def __init__(self, errors, todo):
+        RuntimeError.__init__(self, repr(errors))
         self.todo = todo
+        self.errors = errors
 
 class EmptyResultError(RuntimeError):
-    def __init__(self, todo):
-        RuntimeError.__init__(self)
+    def __init__(self, errors, todo):
+        RuntimeError.__init__(self, repr(errors))
         self.todo = todo
+        self.errors = errors
 
 class GraphQLException(RuntimeError):
     pass
@@ -281,11 +283,11 @@ class MainScraper():
 
             if not data:
                 log.warning('result was empty')
-                raise EmptyResultError(todo)
+                raise EmptyResultError(errors, todo)
 
             if isinstance(data, str):
                 log.error('result was text, not a dictionary. Assuming Github timed out')
-                raise GithubTimeout(todo)
+                raise GithubTimeout(errors, todo)
 
             repo_node = data.get('repository')
             if repo_node:
@@ -317,7 +319,7 @@ class MainScraper():
                 self.session.query(ReposTodo).filter(ReposTodo.id == todo.id).delete(synchronize_session='fetch')
             else:
                 log.warning('result was empty')
-                raise EmptyResultError(todo)
+                raise EmptyResultError(errors, todo)
 
             self.session.commit()
 
@@ -375,11 +377,11 @@ class MainScraper():
 
             if not data:
                 log.warning('result was empty')
-                raise EmptyResultError(todos)
+                raise EmptyResultError(errors, todos)
 
             if isinstance(data, str):
                 log.error('result was text, not a dictionary. Assuming Github timed out')
-                raise GithubTimeout(todos)
+                raise GithubTimeout(errors, todos)
 
             for key, node in data.items():
                 if not key.lower().startswith('repo'):
@@ -454,14 +456,16 @@ class MainScraper():
 
                     except (GithubTimeout, EmptyResultError) as e:
                         todo = e.todo
-                        self.expand_errors.setdefault(todo.id, 0)
-                        self.expand_errors[todo.id] += 1
-                        log.error('Error count for expanding %s/%s is %d',
-                                  todo.repo.owner.login, todo.repo.name, self.expand_errors[todo.id])
+                        self.expand_errors.setdefault(todo.id, [])
+                        self.expand_errors[todo.id].append(e.errors)
 
-                        if self.expand_errors[todo.id] > MAX_EXPAND_ERRORS:
+                        errors_sofar = self.expand_errors[todo.id]
+                        log.error('Error count for expanding %s/%s is %d',
+                                  todo.repo.owner.login, todo.repo.name, len(errors_sofar))
+
+                        if len(errors_sofar) > MAX_EXPAND_ERRORS:
                             with self.session.begin_nested():
-                                self.session.add(RepoError(repo=todo.repo))
+                                self.session.add(RepoError(repo=todo.repo, error_text=repr([e for e in errors_sofar if e])))
                                 self.session.delete(todo)
                             self.session.commit()
 
