@@ -4,6 +4,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.ext.associationproxy import association_proxy
 from sqlalchemy.orm import relationship, sessionmaker
+from sqlalchemy import func, desc, asc, exists
 
 import github_repos.config as g
 
@@ -104,3 +105,34 @@ class RepoLanguages(Base):
     language = relationship('Language', back_populates='repos')
 
 Base.metadata.create_all(engine)
+
+
+def get_popular_languages(limit=None, headers=False, reverse=False):
+    s = Session()
+
+    order = asc if reverse else desc
+
+    repo_count = s.query(Repo).count()
+    table = s.query(Language.name, func.count(RepoLanguages.repo_id)) \
+             .join(RepoLanguages) \
+             .group_by(RepoLanguages.lang_id, Language.name) \
+             .order_by(order(func.count(RepoLanguages.repo_id))) \
+             .limit(limit) \
+             .all()
+
+    table = tuple(row + ('{:3f}%'.format(row[1] / repo_count * 100),) for row in table)
+
+    if headers:
+        table = (('name', '"top 10 langs" count', '% share of repos'),) + table
+
+    return table
+
+def get_average_repos_per_owner():
+    s = Session()
+    return s.query(Repo).count() / s.query(Owner).count()
+
+def get_expanded_repo_count():
+    return Session().query(Repo) \
+                    .filter(~exists().where(Repo.id == RepoError.repo_id)) \
+                    .filter(~exists().where(Repo.id == ReposTodo.repo_id)) \
+                    .count()
